@@ -1,0 +1,6 @@
+#!/bin/bash
+
+apt-get -y --force-yes purge docker-engine
+sed -i '/deb https:\/\/apt.dockerproject.org\/repo ubuntu-trusty main/d' /etc/apt/sources.list
+key=$(apt-key list |grep -B 1 Docker |grep pub |sed 's/pub\s\+[A-Za-z0-9]\+\/\([a-zA-Z0-9]\+\)\s.*/\1/g')
+apt-key del $key

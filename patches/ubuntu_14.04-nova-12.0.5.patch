@@ -1,0 +1,1744 @@
+diff --git a/compute/claims.py b/compute/claims.py
+index 4f9abe0..0ab63a0 100644
+--- a/compute/claims.py
++++ b/compute/claims.py
+@@ -72,12 +72,13 @@ class Claim(NopClaim):
+     """
+ 
+     def __init__(self, context, instance, tracker, resources, overhead=None,
+-                 limits=None):
++                 limits=None, fpga_ip_id=None):
+         super(Claim, self).__init__()
+         # Stash a copy of the instance at the current point of time
+         self.instance = instance.obj_clone()
+         self._numa_topology_loaded = False
+         self.tracker = tracker
++        self._fpga_ip_id = fpga_ip_id
+ 
+         if not overhead:
+             overhead = {'memory_mb': 0}
+@@ -130,6 +131,7 @@ class Claim(NopClaim):
+         memory_mb_limit = limits.get('memory_mb')
+         disk_gb_limit = limits.get('disk_gb')
+         numa_topology_limit = limits.get('numa_topology')
++        fpga_regions_limit = limits.get('fpga_regions')
+ 
+         msg = _("Attempting claim: memory %(memory_mb)d MB, disk %(disk_gb)d "
+                 "GB")
+@@ -139,7 +141,8 @@ class Claim(NopClaim):
+         reasons = [self._test_memory(resources, memory_mb_limit),
+                    self._test_disk(resources, disk_gb_limit),
+                    self._test_numa_topology(resources, numa_topology_limit),
+-                   self._test_pci()]
++                   self._test_pci(),
++                   self._test_fpga(resources, fpga_regions_limit)]
+         reasons = reasons + self._test_ext_resources(limits)
+         reasons = [r for r in reasons if r is not None]
+         if len(reasons) > 0:
+@@ -176,6 +179,26 @@ class Claim(NopClaim):
+             if not devs:
+                 return _('Claim pci failed.')
+ 
++    def _test_fpga(self, resources, limit):
++        total = resources.get('fpga_regions', 0)
++        used = resources.get('fpga_regions_used', 0)
++        requested = 1 if self._fpga_ip_id else 0
++
++        if not limit:
++            limit = 0
++
++        free = limit - used
++
++        LOG.info(_LI('FPGA region limit: %(limit)d, free: %(free)d'),
++                 {'limit': limit, 'free': free}, instance=self.instance)
++
++        if requested > free:
++            return (_('Free FPGA region %(free)d < requested %(requested)d') %
++                      {'free': free, 'requested': requested})
++
++        LOG.info(_LI('Total FPGA regions: %(total)d, used: %(used)d '),
++                 {'total': total, 'used': used}, instance=self.instance)
++
+     def _test_ext_resources(self, limits):
+         return self.tracker.ext_resources_handler.test_resources(
+             self.instance, limits)
+diff --git a/compute/manager.py b/compute/manager.py
+index 06f0dda..b8a39e9 100644
+--- a/compute/manager.py
++++ b/compute/manager.py
+@@ -68,6 +68,7 @@ from nova import conductor
+ from nova import consoleauth
+ import nova.context
+ from nova import exception
++from nova import fpga
+ from nova import hooks
+ from nova.i18n import _
+ from nova.i18n import _LE
+@@ -1902,7 +1903,7 @@ class ComputeManager(manager.Manager):
+             self._build_and_run_instance(context, instance, image,
+                     decoded_files, admin_password, requested_networks,
+                     security_groups, block_device_mapping, node, limits,
+-                    filter_properties)
++                    filter_properties, request_spec=request_spec)
+             return build_results.ACTIVE
+         except exception.RescheduledException as e:
+             retry = filter_properties.get('retry')
+@@ -1978,14 +1979,18 @@ class ComputeManager(manager.Manager):
+ 
+     def _build_and_run_instance(self, context, instance, image, injected_files,
+             admin_password, requested_networks, security_groups,
+-            block_device_mapping, node, limits, filter_properties):
++            block_device_mapping, node, limits, filter_properties,
++            request_spec=None):
+ 
+         image_name = image.get('name')
+         self._notify_about_instance_usage(context, instance, 'create.start',
+                 extra_usage_info={'image_name': image_name})
+         try:
+             rt = self._get_resource_tracker(node)
+-            with rt.instance_claim(context, instance, limits):
++            with rt.instance_claim(context, instance, limits, request_spec):
++                fpga_ip_id = fpga.get_ip_image_id(request_spec)
++                if fpga_ip_id:
++                    fpga.program_ip(fpga_ip_id, instance)
+                 # NOTE(russellb) It's important that this validation be done
+                 # *after* the resource tracker instance claim, as that is where
+                 # the host is set on the instance.
+@@ -2397,6 +2402,11 @@ class ComputeManager(manager.Manager):
+         except Exception:
+             with excutils.save_and_reraise_exception():
+                 quotas.rollback()
++        finally:
++            # Check if instance have allocated FPGA device and erase it if so
++            if hasattr(instance, 'fpga_device') and instance.fpga_device:
++                fpga.erase_fpga(instance)
++                self.update_available_resource(context)
+ 
+         self._complete_deletion(context,
+                                 instance,
+@@ -2404,6 +2414,7 @@ class ComputeManager(manager.Manager):
+                                 quotas,
+                                 system_meta)
+ 
++
+     @wrap_exception()
+     @reverts_task_state
+     @wrap_instance_event
+diff --git a/compute/resource_tracker.py b/compute/resource_tracker.py
+index ec3b8ef..e568b4b 100644
+--- a/compute/resource_tracker.py
++++ b/compute/resource_tracker.py
+@@ -20,6 +20,7 @@ model.
+ """
+ import copy
+ 
++from oslo_concurrency import processutils
+ from oslo_config import cfg
+ from oslo_log import log as logging
+ from oslo_serialization import jsonutils
+@@ -31,6 +32,7 @@ from nova.compute import resources as ext_resources
+ from nova.compute import task_states
+ from nova.compute import vm_states
+ from nova import exception
++from nova import fpga
+ from nova.i18n import _, _LI, _LW
+ from nova import objects
+ from nova.objects import base as obj_base
+@@ -41,6 +43,7 @@ from nova.scheduler import client as scheduler_client
+ from nova import utils
+ from nova.virt import hardware
+ 
++
+ resource_tracker_opts = [
+     cfg.IntOpt('reserved_host_disk_mb', default=0,
+                help='Amount of disk in MB to reserve for the host'),
+@@ -52,8 +55,16 @@ resource_tracker_opts = [
+     cfg.ListOpt('compute_resources',
+                 default=['vcpu'],
+                 help='The names of the extra resources to track.'),
++    cfg.BoolOpt('fpga_access',
++                default=False,
++                help="Whether or not instances can access FPGA."),
++    cfg.StrOpt('fpga_exec',
++               default=None,
++               help="Executable for getting status of the FPGA, programming"
++               "and erasing."),
+ ]
+ 
++
+ allocation_ratio_opts = [
+     cfg.FloatOpt('cpu_allocation_ratio',
+         default=0.0,
+@@ -130,7 +141,8 @@ class ResourceTracker(object):
+         self.cpu_allocation_ratio = CONF.cpu_allocation_ratio
+ 
+     @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+-    def instance_claim(self, context, instance_ref, limits=None):
++    def instance_claim(self, context, instance_ref, limits=None,
++                       request_spec=None):
+         """Indicate that some resources are needed for an upcoming compute
+         instance build operation.
+ 
+@@ -142,6 +154,8 @@ class ResourceTracker(object):
+         :type instance_ref: nova.objects.instance.Instance object
+         :param limits: Dict of oversubscription limits for memory, disk,
+                        and CPUs.
++        :param request_spec: dict of parameters describing how instance
++                             should look like.
+         :returns: A Claim ticket representing the reserved resources.  It can
+                   be used to revert the resource usage if an error occurs
+                   during the instance build.
+@@ -169,8 +183,17 @@ class ResourceTracker(object):
+                   "MB", {'flavor': instance_ref.memory_mb,
+                           'overhead': overhead['memory_mb']})
+ 
++
++        fpga_ip_id = fpga.get_ip_image_id(request_spec)
++
++        if fpga_ip_id:
++            # XXX: this should be expanded of total regions on all FPGA
++            # devices
++            limits['fpga_regions'] = self.compute_node.fpga_regions
++
+         claim = claims.Claim(context, instance_ref, self, self.compute_node,
+-                             overhead=overhead, limits=limits)
++                             overhead=overhead, limits=limits,
++                             fpga_ip_id=fpga_ip_id)
+ 
+         # self._set_instance_host_and_node() will save instance_ref to the DB
+         # so set instance_ref['numa_topology'] first.  We need to make sure
+@@ -486,6 +509,12 @@ class ResourceTracker(object):
+     @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
+     def _update_available_resource(self, context, resources):
+ 
++        self._update_fpga_resource(resources)
++        LOG.info(_LI("Total FPGA regions: %(fpga)s, total allocated regions: "
++                     "%(fpga_used)s"),
++                 {'fpga': resources.get('fpga_regions', 0),
++                  'fpga_used': resources.get('fpga_regions_used', 0)})
++
+         # initialise the compute node object, creating it
+         # if it does not already exist.
+         self._init_compute_node(context, resources)
+@@ -948,3 +977,32 @@ class ResourceTracker(object):
+             if key in updates:
+                 usage[key] = updates[key]
+         return usage
++
++    def _update_fpga_resource(self, resources):
++        """XXX: FPGA resource updated hack"""
++
++        if 'fpga_access' not in CONF:
++            return
++
++        if not CONF['fpga_access']:
++            return
++
++        if not CONF['fpga_exec']:
++            raise exception.InvalidInput(reason="fpga_exec not specified!")
++
++        try:
++            result = utils.execute(CONF['fpga_exec'], 'status',
++                                   run_as_root=True)
++        except processutils.ProcessExecutionError as err:
++            result = (err.stdout, err.stderr)
++
++        if result[1]:
++            LOG.warning(_LW('Obtaining FPGA status returned with %d error'
++                            ' message.'), result[1].strip())
++            return
++
++        used_regions, all_regions = [int(x) for x in
++                                     result[0].split(':')[1].split('/')]
++
++        resources['fpga_regions'] = all_regions
++        resources['fpga_regions_used'] = used_regions
+diff --git a/db/sqlalchemy/migrate_repo/versions/303_add_fpga_field.py b/db/sqlalchemy/migrate_repo/versions/303_add_fpga_field.py
+new file mode 100644
+index 0000000..87e1063
+--- /dev/null
++++ b/db/sqlalchemy/migrate_repo/versions/303_add_fpga_field.py
+@@ -0,0 +1,31 @@
++# Copyright 2016 Intel Corporation
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from sqlalchemy import MetaData, Table, Column, Integer
++
++
++def upgrade(migrate_engine):
++    """Function adds compute_nodes fpga field."""
++
++    meta = MetaData(bind=migrate_engine)
++    compute_nodes = Table('compute_nodes', meta, autoload=True)
++    shadow_compute_nodes = Table('shadow_compute_nodes', meta, autoload=True)
++
++    fpga_regions = Column('fpga_regions', Integer)
++    fpga_regions_used = Column('fpga_regions_used', Integer)
++
++    compute_nodes.create_column(fpga_regions)
++    shadow_compute_nodes.create_column(fpga_regions.copy())
++    compute_nodes.create_column(fpga_regions_used)
++    shadow_compute_nodes.create_column(fpga_regions_used.copy())
+diff --git a/db/sqlalchemy/migrate_repo/versions/304_add_fpga_instance_field.py b/db/sqlalchemy/migrate_repo/versions/304_add_fpga_instance_field.py
+new file mode 100644
+index 0000000..4fc463b
+--- /dev/null
++++ b/db/sqlalchemy/migrate_repo/versions/304_add_fpga_instance_field.py
+@@ -0,0 +1,28 @@
++# Copyright 2016 Intel Corporation
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from sqlalchemy import MetaData, Table, Column, String
++
++
++def upgrade(migrate_engine):
++    """Function adds compute_nodes fpga field."""
++
++    meta = MetaData(bind=migrate_engine)
++    instances = Table('instances', meta, autoload=True)
++    shadow_instances = Table('shadow_instances', meta, autoload=True)
++
++    fpga_device = Column('fpga_device', String(255))
++
++    instances.create_column(fpga_device)
++    shadow_instances.create_column(fpga_device.copy())
+diff --git a/db/sqlalchemy/migrate_repo/versions/305_add_fpga_devices_table.py b/db/sqlalchemy/migrate_repo/versions/305_add_fpga_devices_table.py
+new file mode 100644
+index 0000000..92e6601
+--- /dev/null
++++ b/db/sqlalchemy/migrate_repo/versions/305_add_fpga_devices_table.py
+@@ -0,0 +1,54 @@
++# Copyright 2012 OpenStack Foundation
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++
++from migrate.changeset import UniqueConstraint
++from sqlalchemy import Column, DateTime
++from sqlalchemy import Index, Integer, MetaData, String, Table
++
++
++def upgrade(migrate_engine):
++    meta = MetaData()
++    meta.bind = migrate_engine
++
++    fpga_devices_uc_name = ('uniq_fpga_devices0compute_node_id0'
++                            'accelerator_ip0deleted')
++    for prefix in ('', 'shadow_'):
++        basename = prefix + 'fpga_devices'
++        if migrate_engine.has_table(basename):
++            continue
++
++        compute_node_ix = ('ix_%s_compute_node_id_deleted' %
++                           basename)
++        instance_uuid_ix = ('ix_%s_instance_uuid_deleted' %
++                            basename)
++
++        fpga_devices = Table(basename, meta,
++            Column('created_at', DateTime(timezone=False)),
++            Column('updated_at', DateTime(timezone=False)),
++            Column('deleted_at', DateTime(timezone=False)),
++            Column('deleted', Integer, nullable=False, default=0),
++            Column('id', Integer, primary_key=True),
++            Column('compute_node_id', Integer, nullable=False),
++            Column('status', String(36), nullable=False),
++            Column('accelerator_ip', String(255), nullable=True),
++            Column('instance_uuid', String(36), nullable=True),
++            Column('request_id', String(36), nullable=True),
++            Index(compute_node_ix, 'compute_node_id', 'deleted'),
++            Index(instance_uuid_ix, 'instance_uuid', 'deleted'),
++            UniqueConstraint('compute_node_id', 'accelerator_ip', 'deleted',
++                             name=fpga_devices_uc_name),
++            mysql_engine='InnoDB',
++            mysql_charset='utf8')
++
++        fpga_devices.create()
+diff --git a/db/sqlalchemy/models.py b/db/sqlalchemy/models.py
+index 46a4b1b..9cddec3 100644
+--- a/db/sqlalchemy/models.py
++++ b/db/sqlalchemy/models.py
+@@ -176,6 +176,10 @@ class ComputeNode(BASE, NovaBase):
+     ram_allocation_ratio = Column(Float, nullable=True)
+     cpu_allocation_ratio = Column(Float, nullable=True)
+ 
++    # number of FPGA regions available on ComputeNode; 0 means no FPGA avail
++    fpga_regions = Column(Integer, default=0)
++    fpga_regions_used = Column(Integer, default=0)
++
+ 
+ class Certificate(BASE, NovaBase):
+     """Represents a x509 certificate."""
+@@ -338,6 +342,35 @@ class Instance(BASE, NovaBase):
+     # Records whether an instance has been deleted from disk
+     cleaned = Column(Integer, default=0)
+ 
++    # XXX: FPGA device info
++    fpga_device = Column(String(255))
++
++
++class FpgaDevice(BASE, NovaBase):
++    """ Represents FPGA device. """
++    __tablename__ = 'fpga_devices'
++    fpga_devices_uc_name = ('uniq_fpga_devices0compute_node_id0'
++                            'accelerator_ip0deleted')
++    __table_args__ = (
++        Index('ix_fpga_devices_compute_node_id_deleted',
++              'compute_node_id', 'deleted'),
++        Index('ix_fpga_devices_instance_uuid_deleted',
++              'instance_uuid', 'deleted'),
++        schema.UniqueConstraint(
++            'compute_node_id', 'accelerator_ip', 'deleted',
++            name=fpga_devices_uc_name),)
++
++    id = Column(Integer, primary_key=True)
++    created_at = Column(DateTime)
++    updated_at = Column(DateTime)
++    deleted_at = Column(DateTime)
++    deleted = Column(Integer, nullable=False, default=0)
++    compute_node_id = Column(Integer, nullable=False)
++    status = Column(String(36), nullable=False)
++    accelerator_ip = Column(String(255), nullable=True)
++    instance_uuid = Column(String(36), nullable=True)
++    request_id = Column(String(36), nullable=True)
++
+ 
+ class InstanceInfoCache(BASE, NovaBase):
+     """Represents a cache of information about an instance
+diff --git a/fpga/__init__.py b/fpga/__init__.py
+new file mode 100644
+index 0000000..10b7d36
+--- /dev/null
++++ b/fpga/__init__.py
+@@ -0,0 +1,92 @@
++# Copyright 2016 Intel Corporation
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from oslo_concurrency import processutils
++from oslo_config import cfg
++from oslo_log import log as logging
++
++from nova import exception
++from nova import utils
++
++
++CONF = cfg.CONF
++CONF.register_opts([cfg.BoolOpt('fpga_simulation_mode',
++                                default=True,
++                                help='If set to True, FPGA reprogramming '
++                                'will be turned off.')])
++
++LOG = logging.getLogger(__name__)
++
++SPEC = 'hw:fpga_ip_id'
++
++
++def get_ip_image_id(request_spec):
++    if not request_spec:
++        return None
++
++    fpga_ip_id = request_spec.get('instance_type',
++                                  {}).get('extra_specs', {}).get(SPEC)
++    if request_spec.get('image', {}).get('properties', {}).get(SPEC):
++        # This will overwrite ip id from flavor, if definition of IP is found
++        # on image metatdata
++        fpga_ip_id = request_spec.get('image',
++                                       {}).get('properties', {}).get(SPEC)
++
++    return fpga_ip_id
++
++
++def program_ip(fpga_image, instance):
++    """Burn image on FPGA"""
++    if CONF.fpga_simulation_mode:
++        LOG.info('Running in simulation mode. '
++                 'AFU image will not be burned on FPGA')
++        return
++
++    LOG.debug('Attempting to write image to FPGA.')
++
++    try:
++        write_result = utils.execute(CONF.fpga_exec, 'burn', fpga_image,
++                                     run_as_root=True)
++    except processutils.ProcessExecutionError as err:
++        write_result = (err.stdout, err.stderr)
++
++    if write_result[1]:
++        error = write_result[1].strip()
++        LOG.error("Writing FPGA image failed: %s", error)
++        raise exception.RescheduledException('Writing FPGA image for instance'
++                                             ' %s failed: %s' %
++                                             (instance.uuid, error))
++    LOG.debug('Writing AFU image succeeded.')
++
++    instance.fpga_device = write_result[0].strip()
++
++
++def erase_fpga(instance):
++    """Erase a region on FPGA"""
++    if CONF.fpga_simulation_mode:
++        LOG.info("Running in simulation mode. Not erasing FPGA")
++        return
++
++    LOG.debug("Attempting to erase FPGA device %s", instance.fpga_device)
++
++    try:
++        erase_result = utils.execute(CONF.fpga_exec, 'erase',
++                                     instance.fpga_device, run_as_root=True)
++    except processutils.ProcessExecutionError as err:
++        erase_result = (err.stdout, err.stderr)
++
++    if erase_result[1]:
++        LOG.error("Erasing FPGA failed: %s", erase_result[1].strip())
++    else:
++        LOG.debug("Erasing FPGA succeeded.")
+diff --git a/objects/block_device.py b/objects/block_device.py
+index c533f21..7670ee2 100644
+--- a/objects/block_device.py
++++ b/objects/block_device.py
+@@ -58,7 +58,8 @@ class BlockDeviceMapping(base.NovaPersistentObject, base.NovaObject,
+     # Version 1.13: Instance version 1.21
+     # Version 1.14: Instance version 1.22
+     # Version 1.15: Instance version 1.23
+-    VERSION = '1.15'
++    # Version 1.15: Instance version 1.24
++    VERSION = '1.16'
+ 
+     fields = {
+         'id': fields.IntegerField(),
+@@ -85,7 +86,7 @@ class BlockDeviceMapping(base.NovaPersistentObject, base.NovaObject,
+         'instance': [('1.0', '1.13'), ('1.2', '1.14'), ('1.3', '1.15'),
+                      ('1.4', '1.16'), ('1.5', '1.17'), ('1.6', '1.18'),
+                      ('1.8', '1.19'), ('1.9', '1.20'), ('1.13', '1.21'),
+-                     ('1.14', '1.22'), ('1.15', '1.23')],
++                     ('1.14', '1.22'), ('1.15', '1.23'), ('1.16', '1.24')],
+     }
+ 
+     @staticmethod
+@@ -274,7 +275,7 @@ class BlockDeviceMappingList(base.ObjectListBase, base.NovaObject):
+     # Version 1.14: BlockDeviceMapping <= version 1.13
+     # Version 1.15: BlockDeviceMapping <= version 1.14
+     # Version 1.16: BlockDeviceMapping <= version 1.15
+-    VERSION = '1.16'
++    VERSION = '1.17'
+ 
+     fields = {
+         'objects': fields.ListOfObjectsField('BlockDeviceMapping'),
+@@ -285,7 +286,7 @@ class BlockDeviceMappingList(base.ObjectListBase, base.NovaObject):
+                     ('1.6', '1.5'), ('1.7', '1.6'), ('1.8', '1.7'),
+                     ('1.9', '1.8'), ('1.10', '1.9'), ('1.11', '1.10'),
+                     ('1.12', '1.11'), ('1.13', '1.12'), ('1.14', '1.13'),
+-                    ('1.15', '1.14'), ('1.16', '1.15')],
++                    ('1.15', '1.14'), ('1.16', '1.15'), ('1.17', '1.16')],
+     }
+ 
+     @base.remotable_classmethod
+diff --git a/objects/compute_node.py b/objects/compute_node.py
+index 06b97af..f7ed700 100644
+--- a/objects/compute_node.py
++++ b/objects/compute_node.py
+@@ -48,7 +48,7 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject,
+     # Version 1.12: HVSpec version 1.1
+     # Version 1.13: Changed service_id field to be nullable
+     # Version 1.14: Added cpu_allocation_ratio and ram_allocation_ratio
+-    VERSION = '1.14'
++    VERSION = '1.15'
+ 
+     fields = {
+         'id': fields.IntegerField(read_only=True),
+@@ -82,6 +82,8 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject,
+                                                nullable=True),
+         'cpu_allocation_ratio': fields.FloatField(),
+         'ram_allocation_ratio': fields.FloatField(),
++        'fpga_regions': fields.IntegerField(),
++        'fpga_regions_used': fields.IntegerField(),
+         }
+ 
+     obj_relationships = {
+@@ -186,6 +188,10 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject,
+                     if value == 0.0 and key == 'ram_allocation_ratio':
+                         # It's not specified either on the controller
+                         value = 1.5
++
++            if key in ('fpga_regions', 'fpga_regions_used') and value is None:
++                value = 0
++
+             compute[key] = value
+ 
+         stats = db_compute['stats']
+@@ -331,7 +337,8 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject,
+                 "vcpus_used", "memory_mb_used", "local_gb_used",
+                 "numa_topology", "hypervisor_type",
+                 "hypervisor_version", "hypervisor_hostname",
+-                "disk_available_least", "host_ip"]
++                "disk_available_least", "host_ip", "fpga_regions",
++                "fpga_regions_used"]
+         for key in keys:
+             if key in resources:
+                 self[key] = resources[key]
+@@ -364,7 +371,7 @@ class ComputeNodeList(base.ObjectListBase, base.NovaObject):
+     # Version 1.12 ComputeNode version 1.12
+     # Version 1.13 ComputeNode version 1.13
+     # Version 1.14 ComputeNode version 1.14
+-    VERSION = '1.14'
++    VERSION = '1.15'
+     fields = {
+         'objects': fields.ListOfObjectsField('ComputeNode'),
+         }
+@@ -374,7 +381,8 @@ class ComputeNodeList(base.ObjectListBase, base.NovaObject):
+                     ('1.3', '1.4'), ('1.4', '1.5'), ('1.5', '1.5'),
+                     ('1.6', '1.6'), ('1.7', '1.7'), ('1.8', '1.8'),
+                     ('1.9', '1.9'), ('1.10', '1.10'), ('1.11', '1.11'),
+-                    ('1.12', '1.12'), ('1.13', '1.13'), ('1.14', '1.14')],
++                    ('1.12', '1.12'), ('1.13', '1.13'), ('1.14', '1.14'),
++                    ('1.15', '1.15')],
+         }
+ 
+     @base.remotable_classmethod
+diff --git a/objects/fixed_ip.py b/objects/fixed_ip.py
+index 0779ef0..74fd01c 100644
+--- a/objects/fixed_ip.py
++++ b/objects/fixed_ip.py
+@@ -45,7 +45,8 @@ class FixedIP(obj_base.NovaPersistentObject, obj_base.NovaObject,
+     # Version 1.12: Instance 1.22, FloatingIPList 1.9
+     # Version 1.13: Instance 1.23, FloatingIPList 1.10
+     # Version 1.14: Added vif_id kwarg to associate(_pool), FloatingIPList 1.11
+-    VERSION = '1.14'
++    # Version 1:15 Instance 1.24
++    VERSION = '1.15'
+ 
+     fields = {
+         'id': fields.IntegerField(),
+@@ -72,11 +73,11 @@ class FixedIP(obj_base.NovaPersistentObject, obj_base.NovaObject,
+         'instance': [('1.0', '1.13'), ('1.2', '1.14'), ('1.3', '1.15'),
+                      ('1.6', '1.16'), ('1.7', '1.17'), ('1.8', '1.18'),
+                      ('1.9', '1.19'), ('1.10', '1.20'), ('1.11', '1.21'),
+-                     ('1.12', '1.22'), ('1.13', '1.23')],
++                     ('1.12', '1.22'), ('1.13', '1.23'), ('1.15', '1.24')],
+         'network': [('1.0', '1.2')],
+         'virtual_interface': [('1.1', '1.0')],
+         'floating_ips': [('1.5', '1.7'), ('1.11', '1.8'), ('1.12', '1.9'),
+-                         ('1.13', '1.10'), ('1.14', '1.11')],
++                         ('1.13', '1.10'), ('1.14', '1.11'), ('1.15', '1.12')],
+     }
+ 
+     def obj_make_compatible(self, primitive, target_version):
+@@ -229,7 +230,8 @@ class FixedIPList(obj_base.ObjectListBase, obj_base.NovaObject):
+     # Version 1.12: FixedIP <= version 1.12
+     # Version 1.13: FixedIP <= version 1.13
+     # Version 1.14: FixedIP <= version 1.14
+-    VERSION = '1.14'
++    # Version 1.14: FixedIP <= version 1.15
++    VERSION = '1.15'
+ 
+     fields = {
+         'objects': fields.ListOfObjectsField('FixedIP'),
+@@ -239,7 +241,8 @@ class FixedIPList(obj_base.ObjectListBase, obj_base.NovaObject):
+                     ('1.3', '1.3'), ('1.4', '1.4'), ('1.5', '1.5'),
+                     ('1.6', '1.6'), ('1.7', '1.7'), ('1.8', '1.8'),
+                     ('1.9', '1.9'), ('1.10', '1.10'), ('1.11', '1.11'),
+-                    ('1.12', '1.12'), ('1.13', '1.13'), ('1.14', '1.14')],
++                    ('1.12', '1.12'), ('1.13', '1.13'), ('1.14', '1.14'),
++                    ('1.15', '1.15')],
+         }
+ 
+     @obj_base.remotable_classmethod
+diff --git a/objects/floating_ip.py b/objects/floating_ip.py
+index 3d20305..fe3beb2 100644
+--- a/objects/floating_ip.py
++++ b/objects/floating_ip.py
+@@ -36,7 +36,8 @@ class FloatingIP(obj_base.NovaPersistentObject, obj_base.NovaObject,
+     # Version 1.8: FixedIP <= version 1.12
+     # Version 1.9: FixedIP <= version 1.13
+     # Version 1.10: FixedIP <= version 1.14
+-    VERSION = '1.10'
++    # Version 1.10: FixedIP <= version 1.15
++    VERSION = '1.11'
+     fields = {
+         'id': fields.IntegerField(),
+         'address': fields.IPAddressField(),
+@@ -53,7 +54,7 @@ class FloatingIP(obj_base.NovaPersistentObject, obj_base.NovaObject,
+         'fixed_ip': [('1.0', '1.1'), ('1.2', '1.2'), ('1.3', '1.3'),
+                      ('1.4', '1.4'), ('1.5', '1.5'), ('1.6', '1.6'),
+                      ('1.7', '1.11'), ('1.8', '1.12'), ('1.9', '1.13'),
+-                     ('1.10', '1.14')],
++                     ('1.10', '1.14'), ('1.11', '1.15')],
+     }
+ 
+     @staticmethod
+@@ -180,6 +181,7 @@ class FloatingIPList(obj_base.ObjectListBase, obj_base.NovaObject):
+     # Version 1.9: FloatingIP 1.8
+     # Version 1.10: FloatingIP 1.9
+     # Version 1.11: FloatingIP 1.10
++    # Version 1.11: FloatingIP 1.11
+     fields = {
+         'objects': fields.ListOfObjectsField('FloatingIP'),
+         }
+@@ -187,9 +189,10 @@ class FloatingIPList(obj_base.ObjectListBase, obj_base.NovaObject):
+         'objects': [('1.0', '1.0'), ('1.1', '1.1'), ('1.2', '1.1'),
+                     ('1.3', '1.2'), ('1.4', '1.3'), ('1.5', '1.4'),
+                     ('1.6', '1.5'), ('1.7', '1.6'), ('1.8', '1.7'),
+-                    ('1.9', '1.8'), ('1.10', '1.9'), ('1.11', '1.10')],
++                    ('1.9', '1.8'), ('1.10', '1.9'), ('1.11', '1.10'),
++                    ('1.12', '1.11')],
+         }
+-    VERSION = '1.11'
++    VERSION = '1.12'
+ 
+     @obj_base.remotable_classmethod
+     def get_all(cls, context):
+diff --git a/objects/fpga_device.py b/objects/fpga_device.py
+new file mode 100644
+index 0000000..713bbe1
+--- /dev/null
++++ b/objects/fpga_device.py
+@@ -0,0 +1,255 @@
++# Copyright 2016 Intel Corporation
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++import copy
++
++from oslo_log import log as logging
++from oslo_serialization import jsonutils
++
++from nova import db
++from nova import exception
++from nova import objects
++from nova.objects import base
++from nova.objects import fields
++
++
++LOG = logging.getLogger(__name__)
++
++
++def compare_fpga_device_attributes(obj_a, obj_b):
++    fpga_ignore_fields = base.NovaPersistentObject.fields.keys()
++    for name in obj_a.obj_fields:
++        if name in fpga_ignore_fields:
++            continue
++        is_set_a = obj_a.obj_attr_is_set(name)
++        is_set_b = obj_b.obj_attr_is_set(name)
++        if is_set_a != is_set_b:
++            return False
++        if is_set_a:
++            if getattr(obj_a, name) != getattr(obj_b, name):
++                return False
++    return True
++
++
++@base.NovaObjectRegistry.register
++class FpgaDevice(base.NovaPersistentObject, base.NovaObject):
++    """
++    Object to represent a FPGA device or single region on FGPA device.
++    Idea to not distinguish those two is to treat such device as a vessel for
++    programming an IP (accelerator) which could be passed through to the
++    instance using PCI pass through or using SR-IOV -like mechanism to pass
++    virtual functions to the instance.
++
++    +--------------+    +-----------------+    +------------------+
++    | compute node |--> | FPGA dev/region |--> | FPGA Accelerator |
++    |              |    |                 |    |                  |
++    +--------------+    +-----------------+    +------------------+
++                                                        |
++                                                        V
++                                                   +----------+
++                                                   | Instance |
++                                                   |          |
++                                                   +----------+
++    """
++    # Version 1.0: Initial version
++    VERSION = '1.0'
++
++    fields = {'id': fields.IntegerField(),
++              'compute_node_id': fields.IntegerField(nullable=True),
++              'status': fields.PciDeviceStatusField(),
++              'accelerator_ip': fields.StringField(nullable=True),
++              'instance_uuid': fields.StringField(nullable=True),
++              'request_id': fields.StringField(nullable=True)}
++
++    def update_device(self, dev_dict):
++        """Sync the content from device dictionary to device object.
++
++        The resource tracker updates the available devices periodically.
++        To avoid meaningless syncs with the database, we update the device
++        object only if a value changed.
++        """
++
++        # Note(yjiang5): status/instance_uuid should only be updated by
++        # functions like claim/allocate etc. The id is allocated by
++        # database. The extra_info is created by the object.
++        no_changes = ('status', 'instance_uuid', 'id', 'extra_info')
++        map(lambda x: dev_dict.pop(x, None),
++            [key for key in no_changes])
++
++        for k, v in dev_dict.items():
++            if k in self.fields.keys():
++                setattr(self, k, v)
++            else:
++                # Note (yjiang5) extra_info.update does not update
++                # obj_what_changed, set it explicitely
++                extra_info = self.extra_info
++                extra_info.update({k: v})
++                self.extra_info = extra_info
++
++    def __init__(self, *args, **kwargs):
++        super(FpgaDevice, self).__init__(*args, **kwargs)
++        self.obj_reset_changes()
++        self.extra_info = {}
++
++    def __eq__(self, other):
++        return compare_fpga_device_attributes(self, other)
++
++    def __ne__(self, other):
++        return not (self == other)
++
++    @staticmethod
++    def _from_db_object(context, fpga_device, db_dev):
++        for key in fpga_device.fields:
++            if key != 'extra_info':
++                setattr(fpga_device, key, db_dev[key])
++            else:
++                extra_info = db_dev.get("extra_info")
++                fpga_device.extra_info = jsonutils.loads(extra_info)
++        fpga_device._context = context
++        fpga_device.obj_reset_changes()
++        return fpga_device
++
++    @base.remotable_classmethod
++    def get_by_dev_addr(cls, context, compute_node_id, dev_addr):
++        db_dev = db.fpga_device_get_by_addr(context, compute_node_id, dev_addr)
++        return cls._from_db_object(context, cls(), db_dev)
++
++    @base.remotable_classmethod
++    def get_by_dev_id(cls, context, id):
++        db_dev = db.fpga_device_get_by_id(context, id)
++        return cls._from_db_object(context, cls(), db_dev)
++
++    @classmethod
++    def create(cls, dev_dict):
++        """Create a FPGA device based on hypervisor information.
++
++        As the device object is just created and is not synced with db yet
++        thus we should not reset changes here for fields from dict.
++        """
++        fpga_device = cls()
++        fpga_device.update_device(dev_dict)
++        fpga_device.status = fields.PciDeviceStatus.AVAILABLE
++        return fpga_device
++
++    @base.remotable
++    def save(self):
++        if self.status == fields.PciDeviceStatus.REMOVED:
++            self.status = fields.PciDeviceStatus.DELETED
++            db.fpga_device_destroy(self._context, self.uuid)
++        elif self.status != fields.PciDeviceStatus.DELETED:
++            updates = self.obj_get_changes()
++            if 'extra_info' in updates:
++                updates['extra_info'] = jsonutils.dumps(updates['extra_info'])
++            if updates:
++                db_pci = db.fpga_device_update(self._context, self.uuid)
++                self._from_db_object(self._context, self, db_pci)
++
++    def claim(self, instance):
++        if self.status != fields.PciDeviceStatus.AVAILABLE:
++            raise exception.FpgaDeviceInvalidStatus(
++                compute_node_id=self.compute_node_id,
++                address=self.address, status=self.status,
++                hopestatus=[fields.PciDeviceStatus.AVAILABLE])
++        self.status = fields.PciDeviceStatus.CLAIMED
++        self.instance_uuid = instance['uuid']
++
++    def allocate(self, instance):
++        ok_statuses = (fields.PciDeviceStatus.AVAILABLE,
++                       fields.PciDeviceStatus.CLAIMED)
++        if self.status not in ok_statuses:
++            raise exception.FpgaDeviceInvalidStatus(
++                compute_node_id=self.compute_node_id,
++                status=self.status,
++                hopestatus=ok_statuses)
++        if (self.status == fields.PciDeviceStatus.CLAIMED and
++                self.instance_uuid != instance['uuid']):
++            raise exception.FpgaDeviceInvalidOwner(
++                compute_node_id=self.compute_node_id,
++                owner=self.instance_uuid,
++                hopeowner=instance['uuid'])
++
++        self.status = fields.PciDeviceStatus.ALLOCATED
++        self.instance_uuid = instance['uuid']
++
++        # Notes(yjiang5): remove this check when instance object for
++        # compute manager is finished
++        if isinstance(instance, dict):
++            if 'fpga_devices' not in instance:
++                instance['fpga_devices'] = []
++            instance['fpga_devices'].append(copy.copy(self))
++        else:
++            instance.fpga_devices.objects.append(copy.copy(self))
++
++    def remove(self):
++        if self.status != fields.PciDeviceStatus.AVAILABLE:
++            raise exception.FpgaDeviceInvalidStatus(
++                compute_node_id=self.compute_node_id,
++                status=self.status,
++                hopestatus=[fields.PciDeviceStatus.AVAILABLE])
++        self.status = fields.PciDeviceStatus.REMOVED
++        self.instance_uuid = None
++        self.request_id = None
++
++    def free(self, instance=None):
++        ok_statuses = (fields.PciDeviceStatus.ALLOCATED,
++                       fields.PciDeviceStatus.CLAIMED)
++        if self.status not in ok_statuses:
++            raise exception.FpgaDeviceInvalidStatus(
++                compute_node_id=self.compute_node_id,
++                status=self.status,
++                hopestatus=ok_statuses)
++        if instance and self.instance_uuid != instance['uuid']:
++            raise exception.FpgaDeviceInvalidOwner(
++                compute_node_id=self.compute_node_id,
++                owner=self.instance_uuid,
++                hopeowner=instance['uuid'])
++        old_status = self.status
++        self.status = fields.PciDeviceStatus.AVAILABLE
++        self.instance_uuid = None
++        self.request_id = None
++        if old_status == fields.PciDeviceStatus.ALLOCATED and instance:
++            # Notes(yjiang5): remove this check when instance object for
++            # compute manager is finished
++            existed = next((dev for dev in instance['fpga_devices']
++                if dev.id == self.id))
++            if isinstance(instance, dict):
++                instance['fpga_devices'].remove(existed)
++            else:
++                instance.fpga_devices.objects.remove(existed)
++
++
++@base.NovaObjectRegistry.register
++class FpgaDeviceList(base.ObjectListBase, base.NovaObject):
++    # Version 1.0: Initial version
++    VERSION = '1.0'
++
++    fields = {'objects': fields.ListOfObjectsField('FpgaDevice')}
++    obj_relationships = {'objects': [('1.0', '1.0')]}
++
++    def __init__(self, *args, **kwargs):
++        super(FpgaDeviceList, self).__init__(*args, **kwargs)
++        self.objects = []
++        self.obj_reset_changes()
++
++    @base.remotable_classmethod
++    def get_by_compute_node(cls, context, node_id):
++        db_dev_list = db.fpga_device_get_all_by_node(context, node_id)
++        return base.obj_make_list(context, cls(context), objects.FpgaDevice,
++                                  db_dev_list)
++
++    @base.remotable_classmethod
++    def get_by_instance_uuid(cls, context, uuid):
++        db_dev_list = db.fpga_device_get_all_by_instance_uuid(context, uuid)
++        return base.obj_make_list(context, cls(context), objects.FpgaDevice,
++                                  db_dev_list)
+diff --git a/objects/fpga_device_pool.py b/objects/fpga_device_pool.py
+new file mode 100644
+index 0000000..c1e18d0
+--- /dev/null
++++ b/objects/fpga_device_pool.py
+@@ -0,0 +1,77 @@
++# Copyright (c) 2014 Hewlett-Packard Development Company, L.P.
++# All Rights Reserved.
++#
++#    Licensed under the Apache License, Version 2.0 (the "License"); you may
++#    not use this file except in compliance with the License. You may obtain
++#    a copy of the License at
++#
++#         http://www.apache.org/licenses/LICENSE-2.0
++#
++#    Unless required by applicable law or agreed to in writing, software
++#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
++#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
++#    License for the specific language governing permissions and limitations
++#    under the License.
++
++import copy
++
++from oslo_serialization import jsonutils
++import six
++
++from nova import objects
++from nova.objects import base
++from nova.objects import fields
++from nova import utils
++
++
++@base.NovaObjectRegistry.register
++class FpgaDevicePool(base.NovaObject):
++    # Version 1.0: Initial version
++    VERSION = '1.0'
++
++    fields = {'': fields.StringField(),
++              'count': fields.IntegerField()}
++
++    # NOTE(pmurray): before this object existed the fpga device pool data was
++    # stored as a dict. For backward compatibility we need to be able to read
++    # it in from a dict
++    @classmethod
++    def from_dict(cls, value):
++        pool_dict = copy.copy(value)
++        pool = cls()
++        pool.count = pool_dict.pop("count")
++        return pool
++
++
++@base.NovaObjectRegistry.register
++class FpgaDevicePoolList(base.ObjectListBase, base.NovaObject):
++    # Version 1.0: Initial version
++    VERSION = '1.0'
++    fields = {'objects': fields.ListOfObjectsField('FpgaDevicePool')}
++    obj_relationships = {'objects': [('1.0', '1.0')]}
++
++
++def from_fpga_stats(fpga_stats):
++    """Create and return a FpgaDevicePoolList from the data stored in the db,
++    which can be either the serialized object, or, prior to the creation of the
++    device pool objects, a simple dict or a list of such dicts.
++    """
++    pools = None
++    if isinstance(fpga_stats, six.string_types):
++        try:
++            fpga_stats = jsonutils.loads(fpga_stats)
++        except (ValueError, TypeError):
++            fpga_stats = None
++    if fpga_stats:
++        # Check for object-ness, or old-style storage format.
++        if 'nova_object.namespace' in fpga_stats:
++            pools = objects.FpgaDevicePoolList.obj_from_primitive(fpga_stats)
++        else:
++            # This can be either a dict or a list of dicts
++            if isinstance(fpga_stats, list):
++                pool_list = [objects.FpgaDevicePool.from_dict(stat)
++                             for stat in fpga_stats]
++            else:
++                pool_list = [objects.FpgaDevicePool.from_dict(fpga_stats)]
++            pools = objects.FpgaDevicePoolList(objects=pool_list)
++    return pools
+diff --git a/objects/instance.py b/objects/instance.py
+index fdbc582..46dd670 100644
+--- a/objects/instance.py
++++ b/objects/instance.py
+@@ -179,7 +179,8 @@ class _BaseInstance(base.NovaPersistentObject, base.NovaObject,
+         'vcpu_model': fields.ObjectField('VirtCPUModel', nullable=True),
+         'ec2_ids': fields.ObjectField('EC2Ids'),
+         'migration_context': fields.ObjectField('MigrationContext',
+-                                                nullable=True)
++                                                nullable=True),
++        'fpga_device': fields.StringField(nullable=True)
+         }
+ 
+     obj_extra_fields = ['name']
+@@ -1002,7 +1003,8 @@ class InstanceV1(_BaseInstance):
+     # Version 1.21: TagList 1.1
+     # Version 1.22: InstanceNUMATopology 1.2
+     # Version 1.23: Added migration_context
+-    VERSION = '1.23'
++    # Version 1.24: Added fpga_device
++    VERSION = '1.24'
+ 
+     fields = {
+         # NOTE(sbiswas7): this field is depcrecated,
+@@ -1024,6 +1026,7 @@ class InstanceV1(_BaseInstance):
+         'vcpu_model': [('1.19', '1.0')],
+         'ec2_ids': [('1.20', '1.0')],
+         'migration_context': [('1.23', '1.0')],
++        'fpga_device': [('1.24', '1.0')],
+     }
+ 
+     def obj_make_compatible(self, primitive, target_version):
+@@ -1288,7 +1291,8 @@ class InstanceListV1(_BaseInstanceList):
+     # Version 1.20: Instance <= version 1.22
+     # Version 1.21: New method get_by_grantee_security_group_ids()
+     # Version 1.22: Instance <= version 1.23
+-    VERSION = '1.22'
++    # Version 1.23: Instance <= version 1.24
++    VERSION = '1.23'
+ 
+     NOVA_OBJ_INSTANCE_CLS = InstanceV1
+ 
+@@ -1301,7 +1305,8 @@ class InstanceListV1(_BaseInstanceList):
+                     ('1.13', '1.17'), ('1.14', '1.18'), ('1.15', '1.19'),
+                     ('1.16', '1.19'), ('1.17', '1.20'), ('1.18', '1.21'),
+                     ('1.19', '1.21'), ('1.20', '1.22'), ('1.21', '1.22'),
+-                    ('1.22', '1.23')],
++                    ('1.22', '1.23'), ('1.23', '1.24'),
++                   ],
+     }
+ 
+ 
+diff --git a/objects/request_spec.py b/objects/request_spec.py
+index 09cf954..052dd75 100644
+--- a/objects/request_spec.py
++++ b/objects/request_spec.py
+@@ -317,7 +317,7 @@ class SchedulerRetries(base.NovaObject):
+     }
+ 
+     obj_relationships = {
+-        'hosts': [('1.0', '1.13'), ('1.1', '1.14')],
++        'hosts': [('1.0', '1.13'), ('1.1', '1.15')],
+     }
+ 
+     @classmethod
+diff --git a/objects/service.py b/objects/service.py
+index b0ace1f..90e5499 100644
+--- a/objects/service.py
++++ b/objects/service.py
+@@ -81,7 +81,8 @@ class Service(base.NovaPersistentObject, base.NovaObject,
+     # Version 1.16: Added version
+     # Version 1.17: ComputeNode version 1.13
+     # Version 1.18: ComputeNode version 1.14
+-    VERSION = '1.18'
++    # Version 1.18: ComputeNode version 1.15
++    VERSION = '1.19'
+ 
+     fields = {
+         'id': fields.IntegerField(read_only=True),
+@@ -102,7 +103,7 @@ class Service(base.NovaPersistentObject, base.NovaObject,
+         'compute_node': [('1.1', '1.4'), ('1.3', '1.5'), ('1.5', '1.6'),
+                          ('1.7', '1.8'), ('1.8', '1.9'), ('1.9', '1.10'),
+                          ('1.12', '1.11'), ('1.15', '1.12'), ('1.17', '1.13'),
+-                         ('1.18', '1.14')],
++                         ('1.18', '1.14'), ('1.19', '1.15')],
+     }
+ 
+     def __init__(self, *args, **kwargs):
+@@ -275,7 +276,8 @@ class ServiceList(base.ObjectListBase, base.NovaObject):
+     # Version 1.14: Service version 1.16
+     # Version 1.15: Service version 1.17
+     # Version 1.16: Service version 1.18
+-    VERSION = '1.16'
++    # Version 1.16: Service version 1.19
++    VERSION = '1.17'
+ 
+     fields = {
+         'objects': fields.ListOfObjectsField('Service'),
+@@ -287,7 +289,7 @@ class ServiceList(base.ObjectListBase, base.NovaObject):
+                     ('1.6', '1.8'), ('1.7', '1.9'), ('1.8', '1.10'),
+                     ('1.9', '1.11'), ('1.10', '1.12'), ('1.11', '1.13'),
+                     ('1.12', '1.14'), ('1.13', '1.15'), ('1.14', '1.16'),
+-                    ('1.15', '1.17'), ('1.16', '1.18')],
++                    ('1.15', '1.17'), ('1.16', '1.18'), ('1.17', '1.19')],
+     }
+ 
+     @base.remotable_classmethod
+diff --git a/scheduler/filters/fpga_filter.py b/scheduler/filters/fpga_filter.py
+new file mode 100644
+index 0000000..1e551f6
+--- /dev/null
++++ b/scheduler/filters/fpga_filter.py
+@@ -0,0 +1,54 @@
++# Copyright 2016, OpenStack Foundation
++# All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from nova.scheduler import filters
++
++
++class FpgaFilter(filters.BaseHostFilter):
++    """Fpga filter"""
++
++    def _fpga_in_extra_spec(self, extra_specs, image_props):
++        """Return boolean whether or not extra spec contain fpga keyword"""
++        # filter extra_specs defined as host capabilities.
++        for spec in extra_specs:
++            normal_spec = spec.replace(":", "_")
++            if "fpga" in normal_spec:
++                return True
++
++        # filter image properties defined as host capabilities.
++        # flavor extra_specs override image properties.
++        for key in image_props:
++            if "fpga" in key:
++                return True
++
++        return False
++
++    def host_passes(self, host_state, filter_properties):
++        """Return True if host has an free FPGA region available"""
++
++        req_spec = filter_properties.get('request_spec', {})
++        image_props = req_spec.get('image', {}).get('properties', {})
++        extra_specs = req_spec.get('instance_type', {}).get('extra_specs', {})
++
++        if not image_props and not extra_specs:
++            # there is no extra requirements for the instance
++            return True
++
++        if self._fpga_in_extra_spec(extra_specs, image_props):
++            if host_state.fpga_regions - host_state.fpga_regions_used > 0:
++                return True
++            return False
++
++        return True
+diff --git a/scheduler/host_manager.py b/scheduler/host_manager.py
+index a2950bb..0e2a401 100644
+--- a/scheduler/host_manager.py
++++ b/scheduler/host_manager.py
+@@ -152,6 +152,8 @@ class HostState(object):
+         self.vcpus_used = 0
+         self.pci_stats = None
+         self.numa_topology = None
++        self.fpga_regions = 0
++        self.fpga_regions_used = 0
+ 
+         # Additional host information from the compute node stats:
+         self.num_instances = 0
+@@ -252,6 +254,10 @@ class HostState(object):
+         self.cpu_allocation_ratio = compute.cpu_allocation_ratio
+         self.ram_allocation_ratio = compute.ram_allocation_ratio
+ 
++        # XXX: Fpga stub
++        self.fpga_regions = compute.fpga_regions
++        self.fpga_regions_used = compute.fpga_regions_used
++
+     @set_update_time_on_success
+     def consume_from_instance(self, instance):
+         """Incrementally update host state from an instance."""
+diff --git a/tests/unit/api/openstack/fakes.py b/tests/unit/api/openstack/fakes.py
+index 1f0e835..7e1651b 100644
+--- a/tests/unit/api/openstack/fakes.py
++++ b/tests/unit/api/openstack/fakes.py
+@@ -468,7 +468,8 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
+                   availability_zone='', locked_by=None, cleaned=False,
+                   memory_mb=0, vcpus=0, root_gb=0, ephemeral_gb=0,
+                   instance_type=None, launch_index=0, kernel_id="",
+-                  ramdisk_id="", user_data=None, system_metadata=None):
++                  ramdisk_id="", user_data=None, system_metadata=None,
++                  fpga_device=""):
+     if user_id is None:
+         user_id = 'fake_user'
+     if project_id is None:
+@@ -576,7 +577,8 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
+                   "pci_requests": None,
+                   "flavor": flavorinfo,
+               },
+-        "cleaned": cleaned}
++        "cleaned": cleaned,
++        "fpga_device": ""}
+ 
+     instance.update(info_cache)
+     instance['info_cache']['instance_uuid'] = instance['uuid']
+diff --git a/tests/unit/compute/test_compute.py b/tests/unit/compute/test_compute.py
+index 2639a75..ba0f2de 100644
+--- a/tests/unit/compute/test_compute.py
++++ b/tests/unit/compute/test_compute.py
+@@ -196,7 +196,10 @@ class BaseTestCase(test.TestCase):
+                                    'host': 'fake_phyp1',
+                                    'cpu_allocation_ratio': 16.0,
+                                    'ram_allocation_ratio': 1.5,
+-                                   'host_ip': '127.0.0.1'}]
++                                   'host_ip': '127.0.0.1',
++                                   'fpga_regions': 0,
++                                   'fpga_regions_used': 0
++                                  }]
+             return [objects.ComputeNode._from_db_object(
+                         context, objects.ComputeNode(), cn)
+                     for cn in fake_compute_nodes]
+diff --git a/tests/unit/compute/test_compute_mgr.py b/tests/unit/compute/test_compute_mgr.py
+index 7a9fa89..c8a308d 100644
+--- a/tests/unit/compute/test_compute_mgr.py
++++ b/tests/unit/compute/test_compute_mgr.py
+@@ -234,6 +234,42 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
+             instance.info_cache = None
+             self.compute._delete_instance(self.context, instance, [], quotas)
+ 
++    @mock.patch('nova.compute.manager.ComputeManager._notify_about_instance_usage')
++    @mock.patch('nova.compute.manager.ComputeManager._shutdown_instance')
++    @mock.patch('nova.compute.manager.ComputeManager.update_available_resource')
++    @mock.patch('nova.objects.Instance.destroy')
++    @mock.patch('nova.objects.Instance.save')
++    @mock.patch('nova.fpga.erase_fpga')
++    def test_delete_instance_fpga_erased(self, fpga_erase,
++            instance_save, instance_destroy, update_resources,
++            shutdown_instance, inst_usage_notify):
++        quotas = mock.create_autospec(objects.Quotas, spec_set=True)
++        instance = fake_instance.fake_instance_obj(self.context,
++            vm_state=vm_states.ACTIVE,
++            expected_attrs=['system_metadata', 'info_cache', 'fpga_device'])
++
++        instance.fpga_device = "accelerator_id"
++        self.compute._delete_instance(self.context, instance, [], quotas)
++        fpga_erase.assert_called_once_with(instance)
++
++    @mock.patch('nova.compute.manager.ComputeManager._notify_about_instance_usage')
++    @mock.patch('nova.compute.manager.ComputeManager._shutdown_instance')
++    @mock.patch('nova.compute.manager.ComputeManager.update_available_resource')
++    @mock.patch('nova.objects.Instance.destroy')
++    @mock.patch('nova.objects.Instance.save')
++    @mock.patch('nova.fpga.erase_fpga')
++    def test_delete_instance_without_fpga_no_erasing(self, fpga_erase,
++            instance_save, instance_destroy, update_resources,
++            shutdown_instance, inst_usage_notify):
++        quotas = mock.create_autospec(objects.Quotas, spec_set=True)
++        instance = fake_instance.fake_instance_obj(self.context,
++            vm_state=vm_states.ACTIVE,
++            expected_attrs=['system_metadata', 'info_cache', 'fpga_device'])
++
++        instance.fpga_device = None
++        self.compute._delete_instance(self.context, instance, [], quotas)
++        self.assertFalse(fpga_erase.called)
++
+     @mock.patch.object(network_api.API, 'allocate_for_instance')
+     @mock.patch.object(objects.Instance, 'save')
+     @mock.patch.object(time, 'sleep')
+@@ -3075,7 +3111,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+                 self.image, self.injected_files, self.admin_pass,
+                 self.requested_networks, self.security_groups,
+                 self.block_device_mapping, self.node, self.limits,
+-                self.filter_properties)
++                self.filter_properties, request_spec={})
+         self._instance_action_events()
+         self.mox.ReplayAll()
+ 
+@@ -3189,7 +3225,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+                 self.image, self.injected_files, self.admin_pass,
+                 self.requested_networks, self.security_groups,
+                 self.block_device_mapping, self.node, self.limits,
+-                self.filter_properties).AndRaise(
++                self.filter_properties, request_spec={}).AndRaise(
+                         exception.RescheduledException(reason='',
+                             instance_uuid=self.instance.uuid))
+         self.compute.network_api.cleanup_instance_network_on_host(self.context,
+@@ -3285,7 +3321,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+             self.image, self.injected_files, self.admin_pass,
+             self.requested_networks, self.security_groups,
+             self.block_device_mapping, self.node, self.limits,
+-            self.filter_properties)
++            self.filter_properties, request_spec={})
+         mock_cleanup_network.assert_called_once_with(
+             self.context, instance, self.compute.host)
+         mock_build_ins.assert_called_once_with(self.context,
+@@ -3309,7 +3345,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+                 self.image, self.injected_files, self.admin_pass,
+                 self.requested_networks, self.security_groups,
+                 self.block_device_mapping, self.node, self.limits,
+-                {}).AndRaise(
++                {}, request_spec={}).AndRaise(
+                         exception.RescheduledException(reason='',
+                             instance_uuid=self.instance.uuid))
+         self.compute._cleanup_allocated_networks(self.context, self.instance,
+@@ -3354,7 +3390,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+                 self.image, self.injected_files, self.admin_pass,
+                 self.requested_networks, self.security_groups,
+                 self.block_device_mapping, self.node, self.limits,
+-                self.filter_properties).AndRaise(
++                self.filter_properties, request_spec={}).AndRaise(
+                         exception.RescheduledException(reason='',
+                             instance_uuid=self.instance.uuid))
+         self.compute.driver.deallocate_networks_on_reschedule(
+@@ -3399,7 +3435,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+                 self.image, self.injected_files, self.admin_pass,
+                 self.requested_networks, self.security_groups,
+                 self.block_device_mapping, self.node, self.limits,
+-                self.filter_properties).AndRaise(
++                self.filter_properties, request_spec={}).AndRaise(
+                         exception.RescheduledException(reason='',
+                             instance_uuid=self.instance.uuid))
+         self.compute.driver.deallocate_networks_on_reschedule(
+@@ -3438,7 +3474,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+                 self.image, self.injected_files, self.admin_pass,
+                 self.requested_networks, self.security_groups,
+                 self.block_device_mapping, self.node, self.limits,
+-                self.filter_properties).AndRaise(exc)
++                self.filter_properties, request_spec={}).AndRaise(exc)
+         self.compute._cleanup_allocated_networks(self.context, self.instance,
+                 self.requested_networks)
+         if cleanup_volumes:
+@@ -3665,7 +3701,8 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+         exc = exception.ComputeResourcesUnavailable(reason=reason)
+ 
+         class FakeResourceTracker(object):
+-            def instance_claim(self, context, instance, limits):
++            def instance_claim(self, context, instance, limits,
++                               request_spec=None):
+                 raise exc
+ 
+         self.mox.StubOutWithMock(self.compute, '_get_resource_tracker')
+diff --git a/tests/unit/compute/test_multiple_nodes.py b/tests/unit/compute/test_multiple_nodes.py
+index 1f4b2c5..150fb7f 100644
+--- a/tests/unit/compute/test_multiple_nodes.py
++++ b/tests/unit/compute/test_multiple_nodes.py
+@@ -100,7 +100,9 @@ class MultiNodeComputeTestCase(BaseTestCase):
+                                    'host': 'fake_phyp1',
+                                    'cpu_allocation_ratio': None,
+                                    'ram_allocation_ratio': None,
+-                                   'host_ip': '127.0.0.1'}]
++                                   'host_ip': '127.0.0.1',
++                                   'fpga_regions': 0,
++                                   'fpga_regions_used': 0}]
+             return [objects.ComputeNode._from_db_object(
+                         context, objects.ComputeNode(), cn)
+                     for cn in fake_compute_nodes]
+diff --git a/tests/unit/compute/test_resource_tracker.py b/tests/unit/compute/test_resource_tracker.py
+index e9b0f41..3eebddb 100644
+--- a/tests/unit/compute/test_resource_tracker.py
++++ b/tests/unit/compute/test_resource_tracker.py
+@@ -184,6 +184,7 @@ class FakeVirtDriver(driver.ComputeDriver):
+             'hypervisor_version': 0,
+             'hypervisor_hostname': 'fakehost',
+             'cpu_info': '',
++            'fpga_regions': 0,
+             'numa_topology': (
+                 self.numa_topology._to_json() if self.numa_topology else None),
+         }
+@@ -264,6 +265,8 @@ class BaseTestCase(test.TestCase):
+             'deleted': False,
+             'cpu_allocation_ratio': None,
+             'ram_allocation_ratio': None,
++            'fpga_regions': 0,
++            'fpga_regions_used': 0
+         }
+         if values:
+             compute.update(values)
+diff --git a/tests/unit/db/test_db_api.py b/tests/unit/db/test_db_api.py
+index 2a01339..4bdc3bd 100644
+--- a/tests/unit/db/test_db_api.py
++++ b/tests/unit/db/test_db_api.py
+@@ -7070,7 +7070,8 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
+                                  extra_resources='',
+                                  cpu_allocation_ratio=16.0,
+                                  ram_allocation_ratio=1.5,
+-                                 stats='', numa_topology='')
++                                 stats='', numa_topology='',
++                                 fpga_regions=0, fpga_regions_used=0)
+         # add some random stats
+         self.stats = dict(num_instances=3, num_proj_12345=2,
+                      num_proj_23456=2, num_vm_building=3)
+diff --git a/tests/unit/db/test_migrations.py b/tests/unit/db/test_migrations.py
+index 8b58429..32f5cb3 100644
+--- a/tests/unit/db/test_migrations.py
++++ b/tests/unit/db/test_migrations.py
+@@ -804,6 +804,25 @@ class NovaMigrationsCheckers(test_migrations.ModelsMigrationsSync,
+         self.assertIndexMembers(engine, 'instance_system_metadata',
+                                 'instance_uuid', ['instance_uuid'])
+ 
++    def _check_303(self, engine, data):
++        self.assertColumnExists(engine, 'compute_nodes', 'fpga_regions')
++        self.assertColumnExists(engine, 'shadow_compute_nodes', 'fpga_regions')
++        self.assertColumnExists(engine, 'compute_nodes', 'fpga_regions_used')
++        self.assertColumnExists(engine, 'shadow_compute_nodes',
++                                'fpga_regions_used')
++
++    def _check_304(self, engine, data):
++        self.assertColumnExists(engine, 'instances', 'fpga_device')
++        self.assertColumnExists(engine, 'shadow_instances', 'fpga_device')
++
++    def _check_305(self, engine, data):
++        self.assertColumnExists(engine, 'fpga_devices', 'instance_uuid')
++        self.assertColumnExists(engine, 'shadow_fpga_devices',
++                                'instance_uuid')
++        self.assertIndexMembers(engine, 'fpga_devices',
++                                'ix_fpga_devices_instance_uuid_deleted',
++                                ['instance_uuid', 'deleted'])
++
+ 
+ class TestNovaMigrationsSQLite(NovaMigrationsCheckers,
+                                test_base.DbTestCase,
+diff --git a/tests/unit/objects/test_compute_node.py b/tests/unit/objects/test_compute_node.py
+index 69c5037..078387b 100644
+--- a/tests/unit/objects/test_compute_node.py
++++ b/tests/unit/objects/test_compute_node.py
+@@ -85,6 +85,8 @@ fake_compute_node = {
+     'pci_stats': fake_pci,
+     'cpu_allocation_ratio': 16.0,
+     'ram_allocation_ratio': 1.5,
++    'fpga_regions': 0,
++    'fpga_regions_used': 0
+     }
+ # FIXME(sbauza) : For compatibility checking, to be removed once we are sure
+ # that all computes are running latest DB version with host field in it.
+diff --git a/tests/unit/objects/test_objects.py b/tests/unit/objects/test_objects.py
+index 031555f..752450d 100644
+--- a/tests/unit/objects/test_objects.py
++++ b/tests/unit/objects/test_objects.py
+@@ -1160,32 +1160,32 @@ object_data = {
+     'AggregateList': '1.2-fb6e19f3c3a3186b04eceb98b5dadbfa',
+     'BandwidthUsage': '1.2-c6e4c779c7f40f2407e3d70022e3cd1c',
+     'BandwidthUsageList': '1.2-5fe7475ada6fe62413cbfcc06ec70746',
+-    'BlockDeviceMapping': '1.15-d44d8d694619e79c172a99b3c1d6261d',
+-    'BlockDeviceMappingList': '1.16-6fa262c059dad1d519b9fe05b9e4f404',
++    'BlockDeviceMapping': '1.16-d44d8d694619e79c172a99b3c1d6261d',
++    'BlockDeviceMappingList': '1.17-6fa262c059dad1d519b9fe05b9e4f404',
+     'CellMapping': '1.0-7f1a7e85a22bbb7559fc730ab658b9bd',
+-    'ComputeNode': '1.14-a396975707b66281c5f404a68fccd395',
+-    'ComputeNodeList': '1.14-3b6f4f5ade621c40e70cb116db237844',
++    'ComputeNode': '1.15-4872409604b88ec5b80b2c92de5360ab',
++    'ComputeNodeList': '1.15-3b6f4f5ade621c40e70cb116db237844',
+     'DNSDomain': '1.0-7b0b2dab778454b6a7b6c66afe163a1a',
+     'DNSDomainList': '1.0-4ee0d9efdfd681fed822da88376e04d2',
+     'EC2Ids': '1.0-474ee1094c7ec16f8ce657595d8c49d9',
+     'EC2InstanceMapping': '1.0-a4556eb5c5e94c045fe84f49cf71644f',
+     'EC2SnapshotMapping': '1.0-47e7ddabe1af966dce0cfd0ed6cd7cd1',
+     'EC2VolumeMapping': '1.0-5b713751d6f97bad620f3378a521020d',
+-    'FixedIP': '1.14-53e1c10b539f1a82fe83b1af4720efae',
+-    'FixedIPList': '1.14-87a39361c8f08f059004d6b15103cdfd',
++    'FixedIP': '1.15-53e1c10b539f1a82fe83b1af4720efae',
++    'FixedIPList': '1.15-87a39361c8f08f059004d6b15103cdfd',
+     'Flavor': '1.1-b6bb7a730a79d720344accefafacf7ee',
+     'FlavorList': '1.1-52b5928600e7ca973aa4fc1e46f3934c',
+-    'FloatingIP': '1.10-52a67d52d85eb8b3f324a5b7935a335b',
+-    'FloatingIPList': '1.11-7f2ba670714e1b7bab462ab3290f7159',
++    'FloatingIP': '1.11-52a67d52d85eb8b3f324a5b7935a335b',
++    'FloatingIPList': '1.12-7f2ba670714e1b7bab462ab3290f7159',
+     'HostMapping': '1.0-1a3390a696792a552ab7bd31a77ba9ac',
+     'HVSpec': '1.1-6b4f7c0f688cbd03e24142a44eb9010d',
+     'ImageMeta': '1.7-642d1b2eb3e880a367f37d72dd76162d',
+     'ImageMetaProps': '1.7-f12fc4cf3e25d616f69a66fb9d2a7aa6',
+-    'Instance': '2.0-ff56804dce87d81d9a04834d4bd1e3d2',
++    'Instance': '2.0-fd74a0084db284aac22bd4329cc59382',
+     # NOTE(danms): Reviewers: do not approve changes to the Instance1
+     # object schema. It is frozen for Liberty and will be removed in
+     # Mitaka.
+-    'Instance1': '1.23-4e68422207667f4abff5fa730a5edc98',
++    'Instance1': '1.24-b84aa8f258f769a11feb8ab1c14df0fc',
+     'InstanceAction': '1.1-f9f293e526b66fca0d05c3b3a2d13914',
+     'InstanceActionEvent': '1.1-e56a64fa4710e43ef7af2ad9d6028b33',
+     'InstanceActionEventList': '1.1-13d92fb953030cdbfee56481756e02be',
+@@ -1200,7 +1200,7 @@ object_data = {
+     # NOTE(danms): Reviewers: do not approve changes to the InstanceList1
+     # object schema. It is frozen for Liberty and will be removed in
+     # Mitaka.
+-    'InstanceList1': '1.22-6c8ba6147cca3082b1e4643f795068bf',
++    'InstanceList1': '1.23-6c8ba6147cca3082b1e4643f795068bf',
+     'InstanceMapping': '1.0-47ef26034dfcbea78427565d9177fe50',
+     'InstanceMappingList': '1.0-9e982e3de1613b9ada85e35f69b23d47',
+     'InstanceNUMACell': '1.2-535ef30e0de2d6a0d26a71bd58ecafc4',
+@@ -1236,8 +1236,8 @@ object_data = {
+     'SecurityGroupList': '1.0-dc8bbea01ba09a2edb6e5233eae85cbc',
+     'SecurityGroupRule': '1.1-ae1da17b79970012e8536f88cb3c6b29',
+     'SecurityGroupRuleList': '1.1-674b323c9ccea02e93b1b40e7fd2091a',
+-    'Service': '1.18-f1c6e82b5479f63e35970fe7625c3878',
+-    'ServiceList': '1.16-b767102cba7cbed290e396114c3f86b3',
++    'Service': '1.19-f1c6e82b5479f63e35970fe7625c3878',
++    'ServiceList': '1.17-b767102cba7cbed290e396114c3f86b3',
+     'TaskLog': '1.0-78b0534366f29aa3eebb01860fbe18fe',
+     'TaskLogList': '1.0-cc8cce1af8a283b9d28b55fcd682e777',
+     'Tag': '1.1-8b8d7d5b48887651a0e01241672e2963',
+diff --git a/tests/unit/scheduler/fakes.py b/tests/unit/scheduler/fakes.py
+index b50f581..98952f8 100644
+--- a/tests/unit/scheduler/fakes.py
++++ b/tests/unit/scheduler/fakes.py
+@@ -40,7 +40,8 @@ COMPUTE_NODES = [
+             hypervisor_version=0, numa_topology=None,
+             hypervisor_type='foo', supported_hv_specs=[],
+             pci_device_pools=None, cpu_info=None, stats=None, metrics=None,
+-            cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5),
++            cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
++            fpga_regions=0, fpga_regions_used=0),
+         objects.ComputeNode(
+             id=2, local_gb=2048, memory_mb=2048, vcpus=2,
+             disk_available_least=1024, free_ram_mb=1024, vcpus_used=2,
+@@ -49,7 +50,8 @@ COMPUTE_NODES = [
+             hypervisor_version=0, numa_topology=None,
+             hypervisor_type='foo', supported_hv_specs=[],
+             pci_device_pools=None, cpu_info=None, stats=None, metrics=None,
+-            cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5),
++            cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
++            fpga_regions=0, fpga_regions_used=0),
+         objects.ComputeNode(
+             id=3, local_gb=4096, memory_mb=4096, vcpus=4,
+             disk_available_least=3333, free_ram_mb=3072, vcpus_used=1,
+@@ -58,7 +60,8 @@ COMPUTE_NODES = [
+             hypervisor_version=0, numa_topology=NUMA_TOPOLOGY._to_json(),
+             hypervisor_type='foo', supported_hv_specs=[],
+             pci_device_pools=None, cpu_info=None, stats=None, metrics=None,
+-            cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5),
++            cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
++            fpga_regions=0, fpga_regions_used=0),
+         objects.ComputeNode(
+             id=4, local_gb=8192, memory_mb=8192, vcpus=8,
+             disk_available_least=8192, free_ram_mb=8192, vcpus_used=0,
+@@ -67,7 +70,8 @@ COMPUTE_NODES = [
+             hypervisor_version=0, numa_topology=None,
+             hypervisor_type='foo', supported_hv_specs=[],
+             pci_device_pools=None, cpu_info=None, stats=None, metrics=None,
+-            cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5),
++            cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
++            fpga_regions=0, fpga_regions_used=0),
+         # Broken entry
+         objects.ComputeNode(
+             id=5, local_gb=1024, memory_mb=1024, vcpus=1,
+diff --git a/tests/unit/scheduler/filters/test_fpga_filter.py b/tests/unit/scheduler/filters/test_fpga_filter.py
+new file mode 100644
+index 0000000..b3e4b0a
+--- /dev/null
++++ b/tests/unit/scheduler/filters/test_fpga_filter.py
+@@ -0,0 +1,65 @@
++# Copyright 2016, OpenStack Foundation
++# All Rights Reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++# http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++from nova.scheduler.filters import fpga_filter
++from nova import test
++from nova.tests.unit.scheduler import fakes
++
++
++class TestFpgaFilter(test.NoDBTestCase):
++
++    def test_fpga_filter_passes_image_properties_matched(self):
++        self.filt_cls = fpga_filter.FpgaFilter()
++        filter_properties = {'request_spec': {
++            'image': {'properties': {
++                'fpga': 'accelerator_id'}}}}
++
++        host = fakes.FakeHostState('host1', 'node1',
++                {'fpga_regions': 2, 'fpga_regions_used': 0})
++
++        self.assertTrue(self.filt_cls.host_passes(host, filter_properties))
++
++    def test_fpga_filter_passes_flavor_specs_matched(self):
++        self.filt_cls = fpga_filter.FpgaFilter()
++        filter_properties = {'request_spec': {
++            'instance_type': {'extra_specs': {
++                'hw:fpga_ip_id': 'accelerator_id'}}}}
++
++        host = fakes.FakeHostState('host1', 'node1',
++                {'fpga_regions': 2, 'fpga_regions_used': 0})
++
++        self.assertTrue(self.filt_cls.host_passes(host, filter_properties))
++
++    def test_fpga_filter_fails_no_free_fpga_regions(self):
++        self.filt_cls = fpga_filter.FpgaFilter()
++        filter_properties = {'request_spec': {
++            'instance_type': {'extra_specs': {
++                'hw:fpga_ip_id': 'accelerator_id'}}}}
++
++        host = fakes.FakeHostState('host1', 'node1',
++                {'fpga_regions': 2, 'fpga_regions_used': 2})
++
++        self.assertFalse(self.filt_cls.host_passes(host, filter_properties))
++
++    def test_fpga_filter_passes_no_fpga_property(self):
++        self.filt_cls = fpga_filter.FpgaFilter()
++        filter_properties = {'request_spec': {
++            'instance_type': {'extra_specs': {'some_key': ''}},
++            'image': {'properties': {'some_key': ''}}}}
++
++        host = fakes.FakeHostState('host1', 'node1',
++                {'fpga_regions': 2, 'fpga_regions_used': 0})
++
++        self.assertTrue(self.filt_cls.host_passes(host, filter_properties))
+diff --git a/tests/unit/scheduler/test_host_manager.py b/tests/unit/scheduler/test_host_manager.py
+index af82761..a783f7e 100644
+--- a/tests/unit/scheduler/test_host_manager.py
++++ b/tests/unit/scheduler/test_host_manager.py
+@@ -786,7 +786,8 @@ class HostStateTestCase(test.NoDBTestCase):
+             supported_hv_specs=[],
+             hypervisor_version=hyper_ver_int, numa_topology=None,
+             pci_device_pools=None, metrics=None,
+-            cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5)
++            cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
++            fpga_regions=0, fpga_regions_used=0)
+ 
+         host = host_manager.HostState("fakehost", "fakenode")
+         host.update_from_compute_node(compute)
+@@ -827,7 +828,8 @@ class HostStateTestCase(test.NoDBTestCase):
+             supported_hv_specs=[],
+             hypervisor_version=hyper_ver_int, numa_topology=None,
+             pci_device_pools=None, metrics=None,
+-            cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5)
++            cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
++            fpga_regions=0, fpga_regions_used=0)
+ 
+         host = host_manager.HostState("fakehost", "fakenode")
+         host.update_from_compute_node(compute)
+@@ -859,7 +861,8 @@ class HostStateTestCase(test.NoDBTestCase):
+             supported_hv_specs=[],
+             hypervisor_version=hyper_ver_int, numa_topology=None,
+             pci_device_pools=None, metrics=None,
+-            cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5)
++            cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
++            fpga_regions=0, fpga_regions_used=0)
+ 
+         host = host_manager.HostState("fakehost", "fakenode")
+         host.update_from_compute_node(compute)
+@@ -1025,7 +1028,8 @@ class HostStateTestCase(test.NoDBTestCase):
+             hypervisor_version=hyper_ver_int,
+             numa_topology=fakes.NUMA_TOPOLOGY._to_json(),
+             stats=None, pci_device_pools=None,
+-            cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5)
++            cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
++            fpga_regions=0, fpga_regions_used=0)
+         host = host_manager.HostState("fakehost", "fakenode")
+         host.update_from_compute_node(compute)
+ 

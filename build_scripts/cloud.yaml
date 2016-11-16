@@ -1,0 +1,34 @@
+# Example of simple 3 node setup for FPGA enabled Liberty Openstack on Ubuntu
+# 14.04 server.
+config:
+    ADMIN__OS_PROJECT_DOMAIN_ID: default
+    ADMIN__OS_USER_DOMAIN_ID: default
+    ADMIN__OS_PROJECT_NAME: admin
+    ADMIN__OS_TENANT_NAME: admin
+    ADMIN__OS_USERNAME: admin
+    ADMIN__OS_PASSWORD: admin
+    ADMIN__OS_IDENTITY_API_VERSION: 3
+    DEMO__OS_PROJECT_DOMAIN_ID: default
+    DEMO__OS_USER_DOMAIN_ID: default
+    DEMO__OS_PROJECT_NAME: demo
+    DEMO__OS_TENANT_NAME: demo
+    DEMO__OS_USERNAME: demo
+    DEMO__OS_PASSWORD: demo
+    DEMO__OS_IDENTITY_API_VERSION: 3
+nodes:
+    controller:
+        ips: [192.168.1.3, 192.168.56.3]
+        role: controller
+        modules: [provision_conf, openstackclient_db_mq, keystone, glance,
+            nova, docker, docker_glance, fpga_files, fpga_db,
+            nova_scheduler_filter, flavor_and_image, horizon]
+    compute1:
+        ips: [192.168.1.4, 192.168.56.4]
+        role: compute
+        modules: [provision_conf, nova_compute, docker, nova_docker,
+            nova_docker_patches, fpga_files, fpga_exec]
+    compute2:
+        ips: [192.168.1.5, 192.168.56.5]
+        role: compute
+        modules: [provision_conf, nova_compute, docker, nova_docker,
+            fpga_files]
