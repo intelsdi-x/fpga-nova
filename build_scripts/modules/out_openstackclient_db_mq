@@ -1,0 +1,10 @@
+#!/bin/bash
+
+service mysql stop
+service rabbitmq-server stop
+sed -i '/rabbitmq - nofile 65536/d' /etc/security/limits.conf
+
+apt-get -y --force-yes install python-openstackclient mariadb-server \
+    python-pymysql mariadb-server-5.5 mariadb-client-5.5 \
+    mariadb-server-core-5.5 mariadb-common rabbitmq-server \
+    libmariadbclient18:amd64 mariadb-client-core-5.5 mariadb-server

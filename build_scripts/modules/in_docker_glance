@@ -1,0 +1,19 @@
+#!/bin/bash
+
+cat /etc/glance/glance-api.conf | awk '/\[DEFAULT\]/ { print; print "container_formats = ami,ari,aki,bare,ovf,ova,docker"; next }1' > glance-api.conf
+mv glance-api.conf /etc/glance/glance-api.conf
+service glance-api restart
+service glance-registry restart
+
+. admin-openrc.sh
+
+docker pull busybox
+docker save -o busyimg busybox
+openstack image create --file busyimg --public --container-format docker --disk-format raw busybox 
+rm busyimg
+IMAGE_ID=$(openstack image list | grep busybox | awk '{print $2}')
+if [ "${IMAGE_ID}x" == "x" ]; then
+    echo "Cannot find busybox image"
+    exit 1
+fi
+glance image-update --property os_command_line='/bin/sleep 100d' $IMAGE_ID

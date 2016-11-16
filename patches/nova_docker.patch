@@ -1,0 +1,93 @@
+diff -Naur '--exclude=.git' nova-docker/novadocker/tests/virt/docker/mock_client.py nova-docker_modified/novadocker/tests/virt/docker/mock_client.py
+--- nova-docker/novadocker/tests/virt/docker/mock_client.py	2016-10-10 09:23:42.340324506 +0200
++++ nova-docker_modified/novadocker/tests/virt/docker/mock_client.py	2016-10-10 08:28:00.000000000 +0200
+@@ -115,7 +115,8 @@
+         }
+         return container_id
+ 
+-    def start(self, container_id, binds=None, dns=None, privileged=False):
++    def start(self, container_id, binds=None, dns=None, privileged=False,
++              devices=None):
+         if container_id not in self._containers:
+             return False
+         self._containers[container_id]['running'] = True
+diff -Naur '--exclude=.git' nova-docker/novadocker/tests/virt/docker/test_driver.py nova-docker_modified/novadocker/tests/virt/docker/test_driver.py
+--- nova-docker/novadocker/tests/virt/docker/test_driver.py	2016-10-10 09:25:31.712328306 +0200
++++ nova-docker_modified/novadocker/tests/virt/docker/test_driver.py	2016-10-10 10:54:02.000000000 +0200
+@@ -471,3 +471,32 @@
+                               'fake_files', 'fake_password')
+         info = self.connection._find_container_by_uuid(instance_href['uuid'])
+         self.assertEqual(instance_href['name'], info['Config'].get('Hostname'))
++
++    def test_start_container_pass_devices(self, image_info=None,
++                                          instance_href=None,
++                                          network_info=None):
++        if instance_href is None:
++            instance_href = utils.get_test_instance()
++        if image_info is None:
++            image_info = utils.get_test_image_info(None, instance_href)
++            image_info['disk_format'] = 'raw'
++            image_info['container_format'] = 'docker'
++            image_info['properties'] = {'os_command_line': 'uname',
++                                        'docker_devices': '/dev/loop2,'
++                                        '/dev/loop3'}
++
++        with mock.patch.object(self.mock_client, 'start') as mc:
++            self.connection.spawn(self.context, instance_href, image_info,
++                                  'fake_files', 'fake_password',
++                                  network_info=network_info)
++            self.assertEqual(mc.call_args[1]['devices'],
++                             ['/dev/loop2', '/dev/loop3'])
++
++        # Test with one device
++        image_info['properties'] = {'os_command_line': 'uname',
++                                    'docker_devices': '/dev/floppy'}
++        with mock.patch.object(self.mock_client, 'start') as mc:
++            self.connection.spawn(self.context, instance_href, image_info,
++                                  'fake_files', 'fake_password',
++                                  network_info=network_info)
++            self.assertEqual(mc.call_args[1]['devices'], ['/dev/floppy'])
+diff -Naur '--exclude=.git' nova-docker/novadocker/virt/docker/driver.py nova-docker_modified/novadocker/virt/docker/driver.py
+--- nova-docker/novadocker/virt/docker/driver.py	2016-10-10 09:25:31.716328306 +0200
++++ nova-docker_modified/novadocker/virt/docker/driver.py	2016-10-10 10:47:11.000000000 +0200
+@@ -440,11 +440,13 @@
+             binds = {mount_origin: {'bind': '/root/.ssh', 'ro': True}}
+         return binds
+ 
+-    def _start_container(self, container_id, instance, network_info=None):
++    def _start_container(self, container_id, instance, network_info=None,
++                         start_args=None):
++        start_args = start_args if start_args else {}
+         binds = self._get_key_binds(container_id, instance)
+         dns = self._extract_dns_entries(network_info)
+         self.docker.start(container_id, binds=binds, dns=dns,
+-                          privileged=CONF.docker.privileged)
++                          privileged=CONF.docker.privileged, **start_args)
+ 
+         if not network_info:
+             return
+@@ -471,6 +473,14 @@
+             'network_disabled': True,
+         }
+ 
++        start_args = {}
++        try:
++            docker_devices = image_meta['properties']['docker_devices']
++            if docker_devices:
++                start_args.update({"devices": docker_devices.split(',')})
++        except (KeyError, TypeError):
++            pass
++
+         try:
+             image = self.docker.inspect_image(self._encode_utf8(image_name))
+         except errors.APIError:
+@@ -492,7 +502,8 @@
+                 _('Cannot create container'),
+                 instance_id=instance['name'])
+ 
+-        self._start_container(container_id, instance, network_info)
++        self._start_container(container_id, instance, network_info,
++                              start_args)
+ 
+     def _inject_key(self, id, key):
+         if isinstance(id, dict):

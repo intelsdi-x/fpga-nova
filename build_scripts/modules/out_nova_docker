@@ -1,0 +1,5 @@
+#!/bin/bash
+
+service nova-compute stop
+rm -fr nova-docker
+pip uninstall nova-docker -y

@@ -1,0 +1,8 @@
+#!/bin/bash
+
+apt-get -y --force-yes install chrony
+sed -i '/^server [0-9].debian.*/d' /etc/chrony/chrony.conf
+echo 'server 172.28.168.170 offline minpoll 8' >> /etc/chrony/chrony.conf
+apt-get -y --force-yes install software-properties-common
+add-apt-repository -y cloud-archive:liberty
+apt-get update && apt-get -y --force-yes dist-upgrade

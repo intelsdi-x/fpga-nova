@@ -1,0 +1,4 @@
+#!/bin/bash
+
+service nova-compute stop
+rm -fr fpga-nova

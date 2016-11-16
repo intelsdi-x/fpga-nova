@@ -1,0 +1,6 @@
+#!/bin/bash
+
+service nova-compute stop
+service nova-network stop
+
+apt-get -y --force-yes purge nova-compute nova-network sysfsutils

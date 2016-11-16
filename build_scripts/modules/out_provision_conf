@@ -1,0 +1,6 @@
+#!/bin/bash
+
+apt-get -y --force-yes purge chrony
+apt-get -y --force-yes purge software-properties-common
+add-apt-repository -y --remove cloud-archive:liberty
+apt-get update && apt-get -y --force-yes dist-upgrade
