@@ -1,0 +1,17 @@
+#!/bin/bash
+set -x
+
+apt-key adv --keyserver hkp://p80.pool.sks-keyservers.net:80 --recv-keys 58118E89F3A912897C070ADBF76221572C52609D
+apt-key list |grep -iq docker
+while [[ $? != 0 ]]; do
+    echo "*** Error getting the key, retrying…"
+    apt-key adv --keyserver hkp://p80.pool.sks-keyservers.net:80 --recv-keys 58118E89F3A912897C070ADBF76221572C52609D
+    apt-key list |grep -iq docker
+done
+
+echo 'deb https://apt.dockerproject.org/repo ubuntu-trusty main' >> /etc/apt/sources.list
+apt-get update
+apt-get -y --force-yes purge lxc-docker
+apt-get -y --force-yes install docker-engine
+
+docker pull busybox

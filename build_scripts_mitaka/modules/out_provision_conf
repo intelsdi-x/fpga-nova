@@ -1,0 +1,7 @@
+#!/bin/bash
+set -x
+
+apt-get -y --force-yes purge chrony
+apt-get -y --force-yes purge software-properties-common
+add-apt-repository -y --remove cloud-archive:mitaka
+apt-get update && apt-get -y --force-yes dist-upgrade
