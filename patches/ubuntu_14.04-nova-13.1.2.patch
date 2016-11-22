@@ -321,6 +321,38 @@ index 0000000..87e1063
 +    shadow_compute_nodes.create_column(fpga_regions.copy())
 +    compute_nodes.create_column(fpga_regions_used)
 +    shadow_compute_nodes.create_column(fpga_regions_used.copy())
+diff --git a/db/sqlalchemy/migrate_repo/versions/303_placeholder.py b/db/sqlalchemy/migrate_repo/versions/303_placeholder.py
+deleted file mode 100644
+index 50ff45b..0000000
+--- a/db/sqlalchemy/migrate_repo/versions/303_placeholder.py
++++ /dev/null
+@@ -1,22 +0,0 @@
+-#    Licensed under the Apache License, Version 2.0 (the "License"); you may
+-#    not use this file except in compliance with the License. You may obtain
+-#    a copy of the License at
+-#
+-#         http://www.apache.org/licenses/LICENSE-2.0
+-#
+-#    Unless required by applicable law or agreed to in writing, software
+-#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+-#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+-#    License for the specific language governing permissions and limitations
+-#    under the License.
+-
+-# This is a placeholder for Liberty backports.
+-# Do not use this number for new Mitaka work.  New work starts after
+-# all the placeholders.
+-#
+-# See this for more information:
+-# http://lists.openstack.org/pipermail/openstack-dev/2013-March/006827.html
+-
+-
+-def upgrade(migrate_engine):
+-    pass
+diff --git a/db/sqlalchemy/migrate_repo/versions/303_placeholder.pyc b/db/sqlalchemy/migrate_repo/versions/303_placeholder.pyc
+deleted file mode 100644
+index a758ccd..0000000
+Binary files a/db/sqlalchemy/migrate_repo/versions/303_placeholder.pyc and /dev/null differ
 diff --git a/db/sqlalchemy/migrate_repo/versions/304_add_fpga_instance_field.py b/db/sqlalchemy/migrate_repo/versions/304_add_fpga_instance_field.py
 new file mode 100644
 index 0000000..4fc463b
@@ -355,6 +387,38 @@ index 0000000..4fc463b
 +
 +    instances.create_column(fpga_device)
 +    shadow_instances.create_column(fpga_device.copy())
+diff --git a/db/sqlalchemy/migrate_repo/versions/304_placeholder.py b/db/sqlalchemy/migrate_repo/versions/304_placeholder.py
+deleted file mode 100644
+index 50ff45b..0000000
+--- a/db/sqlalchemy/migrate_repo/versions/304_placeholder.py
++++ /dev/null
+@@ -1,22 +0,0 @@
+-#    Licensed under the Apache License, Version 2.0 (the "License"); you may
+-#    not use this file except in compliance with the License. You may obtain
+-#    a copy of the License at
+-#
+-#         http://www.apache.org/licenses/LICENSE-2.0
+-#
+-#    Unless required by applicable law or agreed to in writing, software
+-#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+-#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+-#    License for the specific language governing permissions and limitations
+-#    under the License.
+-
+-# This is a placeholder for Liberty backports.
+-# Do not use this number for new Mitaka work.  New work starts after
+-# all the placeholders.
+-#
+-# See this for more information:
+-# http://lists.openstack.org/pipermail/openstack-dev/2013-March/006827.html
+-
+-
+-def upgrade(migrate_engine):
+-    pass
+diff --git a/db/sqlalchemy/migrate_repo/versions/304_placeholder.pyc b/db/sqlalchemy/migrate_repo/versions/304_placeholder.pyc
+deleted file mode 100644
+index 84b85f5..0000000
+Binary files a/db/sqlalchemy/migrate_repo/versions/304_placeholder.pyc and /dev/null differ
 diff --git a/db/sqlalchemy/migrate_repo/versions/305_add_fpga_devices_table.py b/db/sqlalchemy/migrate_repo/versions/305_add_fpga_devices_table.py
 new file mode 100644
 index 0000000..92e6601
@@ -415,6 +479,38 @@ index 0000000..92e6601
 +            mysql_charset='utf8')
 +
 +        fpga_devices.create()
+diff --git a/db/sqlalchemy/migrate_repo/versions/305_placeholder.py b/db/sqlalchemy/migrate_repo/versions/305_placeholder.py
+deleted file mode 100644
+index 50ff45b..0000000
+--- a/db/sqlalchemy/migrate_repo/versions/305_placeholder.py
++++ /dev/null
+@@ -1,22 +0,0 @@
+-#    Licensed under the Apache License, Version 2.0 (the "License"); you may
+-#    not use this file except in compliance with the License. You may obtain
+-#    a copy of the License at
+-#
+-#         http://www.apache.org/licenses/LICENSE-2.0
+-#
+-#    Unless required by applicable law or agreed to in writing, software
+-#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+-#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+-#    License for the specific language governing permissions and limitations
+-#    under the License.
+-
+-# This is a placeholder for Liberty backports.
+-# Do not use this number for new Mitaka work.  New work starts after
+-# all the placeholders.
+-#
+-# See this for more information:
+-# http://lists.openstack.org/pipermail/openstack-dev/2013-March/006827.html
+-
+-
+-def upgrade(migrate_engine):
+-    pass
+diff --git a/db/sqlalchemy/migrate_repo/versions/305_placeholder.pyc b/db/sqlalchemy/migrate_repo/versions/305_placeholder.pyc
+deleted file mode 100644
+index 41d39c7..0000000
+Binary files a/db/sqlalchemy/migrate_repo/versions/305_placeholder.pyc and /dev/null differ
 diff --git a/db/sqlalchemy/models.py b/db/sqlalchemy/models.py
 index a133352..d365fc7 100644
 --- a/db/sqlalchemy/models.py
@@ -468,10 +564,10 @@ index a133352..d365fc7 100644
      """Represents a cache of information about an instance
 diff --git a/fpga/__init__.py b/fpga/__init__.py
 new file mode 100644
-index 0000000..0fa1415
+index 0000000..b0d93e7
 --- /dev/null
 +++ b/fpga/__init__.py
-@@ -0,0 +1,105 @@
+@@ -0,0 +1,106 @@
 +# Copyright 2016 Intel Corporation
 +#
 +# Licensed under the Apache License, Version 2.0 (the "License");
@@ -503,6 +599,7 @@ index 0000000..0fa1415
 +LOG = logging.getLogger(__name__)
 +
 +SPEC = 'hw:fpga_ip_id'
++IMAGE_SPEC = 'hw_fpga_ip_id'
 +
 +
 +def get_ip_image_id(request_spec):
@@ -511,12 +608,12 @@ index 0000000..0fa1415
 +
 +    fpga_ip_id = request_spec.get('instance_type',
 +                                  {}).get('extra_specs', {}).get(SPEC)
-+    if request_spec.get('image', {}).get('properties', {}).get(SPEC):
++    image_fpga_key = request_spec.get('image', {}).get('properties',
++                                                       {}).get(IMAGE_SPEC)
++    if image_fpga_key:
 +        # This will overwrite ip id from flavor, if definition of IP is found
 +        # on image metatdata
-+        fpga_ip_id = request_spec.get('image',
-+                                       {}).get('properties', {}).get(SPEC)
-+
++        fpga_ip_id = image_fpga_key
 +    return fpga_ip_id
 +
 +
@@ -1022,6 +1119,20 @@ index 0000000..c1e18d0
 +                pool_list = [objects.FpgaDevicePool.from_dict(fpga_stats)]
 +            pools = objects.FpgaDevicePoolList(objects=pool_list)
 +    return pools
+diff --git a/objects/image_meta.py b/objects/image_meta.py
+index 72a16dc..605a999 100644
+--- a/objects/image_meta.py
++++ b/objects/image_meta.py
+@@ -313,6 +313,9 @@ class ImageMetaProps(base.NovaObject):
+         # boolean - If true, this will enable the virtio-multiqueue feature
+         'hw_vif_multiqueue_enabled': fields.FlexibleBooleanField(),
+ 
++        # FPGA image UUID
++        'hw_fpga_ip_id': fields.UUIDField(),
++
+         # if true download using bittorrent
+         'img_bittorrent': fields.FlexibleBooleanField(),
+ 
 diff --git a/objects/instance.py b/objects/instance.py
 index e759fb5..390c2d2 100644
 --- a/objects/instance.py
@@ -1070,10 +1181,10 @@ index aea839c..3c9b3e9 100644
      def get_by_topic(cls, context, topic):
 diff --git a/scheduler/filters/fpga_filter.py b/scheduler/filters/fpga_filter.py
 new file mode 100644
-index 0000000..1e551f6
+index 0000000..388e854
 --- /dev/null
 +++ b/scheduler/filters/fpga_filter.py
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,58 @@
 +# Copyright 2016, OpenStack Foundation
 +# All Rights Reserved.
 +#
@@ -1095,39 +1206,43 @@ index 0000000..1e551f6
 +class FpgaFilter(filters.BaseHostFilter):
 +    """Fpga filter"""
 +
-+    def _fpga_in_extra_spec(self, extra_specs, image_props):
-+        """Return boolean whether or not extra spec contain fpga keyword"""
-+        # filter extra_specs defined as host capabilities.
-+        for spec in extra_specs:
-+            normal_spec = spec.replace(":", "_")
-+            if "fpga" in normal_spec:
-+                return True
-+
-+        # filter image properties defined as host capabilities.
-+        # flavor extra_specs override image properties.
-+        for key in image_props:
-+            if "fpga" in key:
-+                return True
-+
-+        return False
-+
-+    def host_passes(self, host_state, filter_properties):
++    def host_passes(self, host_state, req_spec):
 +        """Return True if host has an free FPGA region available"""
++        image_props = req_spec.image.properties
++        extra_specs = req_spec.flavor.extra_specs
 +
-+        req_spec = filter_properties.get('request_spec', {})
-+        image_props = req_spec.get('image', {}).get('properties', {})
-+        extra_specs = req_spec.get('instance_type', {}).get('extra_specs', {})
-+
-+        if not image_props and not extra_specs:
-+            # there is no extra requirements for the instance
-+            return True
-+
-+        if self._fpga_in_extra_spec(extra_specs, image_props):
++        if self._fpga_requested(extra_specs, image_props):
 +            if host_state.fpga_regions - host_state.fpga_regions_used > 0:
 +                return True
 +            return False
 +
 +        return True
++
++    def _fpga_requested(self, extra_specs, image_props):
++        """Return boolean whether or not FPGA has been requested
++        via flavo"""
++        return self._fpga_in_extra_specs(extra_specs) or \
++                        self._fpga_in_image_metadata(image_props)
++
++        return False
++
++    def _fpga_in_extra_specs(self, extra_specs):
++        """Filter extra_specs defined as host capabilities."""
++        if not extra_specs:
++            return False
++
++        for spec in extra_specs:
++            if "fpga" in spec:
++                return True
++        return False
++
++    def _fpga_in_image_metadata(self, image_props):
++        """Filter image properties defined as host capabilities.
++        flavor extra_specs override image properties."""
++        if hasattr(image_props, 'hw_fpga_ip_id'):
++            if image_props.hw_fpga_ip_id is not None:
++                return True
++        return False
 diff --git a/scheduler/host_manager.py b/scheduler/host_manager.py
 index ab0ccf0..def3bcd 100644
 --- a/scheduler/host_manager.py
