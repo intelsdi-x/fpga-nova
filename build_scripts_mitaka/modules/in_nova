@@ -71,13 +71,6 @@ password = NOVA_PASS
 lock_path = /var/lib/nova/tmp
 
 [glance]
-host = http://CONTROLLER_HOSTNAME:9292
+api_servers = http://CONTROLLER_HOSTNAME:9292
 EOF
-
-su -s /bin/sh -c "nova-manage api_db sync" nova
-su -s /bin/sh -c "nova-manage db sync" nova
-
-service nova-api restart
-service nova-scheduler restart
-service nova-conductor restart
 

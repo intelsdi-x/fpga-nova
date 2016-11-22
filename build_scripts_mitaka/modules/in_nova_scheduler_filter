@@ -9,8 +9,5 @@ cat /etc/nova/nova.conf | awk '/\[DEFAULT\]/ { print; print "scheduler_available
 mv nova.conf /etc/nova/nova.conf
 
 service nova-api restart
-service nova-cert restart
-service nova-consoleauth restart
 service nova-scheduler restart
 service nova-conductor restart
-service nova-novncproxy restart

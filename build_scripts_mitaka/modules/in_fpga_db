@@ -2,4 +2,10 @@
 set -x
 
 . admin-openrc.sh
-nova-manage db sync
+
+su -s /bin/sh -c "nova-manage api_db sync" nova
+su -s /bin/sh -c "nova-manage db sync" nova
+
+service nova-api restart
+service nova-scheduler restart
+service nova-conductor restart

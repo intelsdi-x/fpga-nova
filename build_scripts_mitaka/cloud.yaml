@@ -20,7 +20,7 @@ nodes:
         ips: [192.168.1.13, 192.168.56.13]
         role: controller
         modules: [provision_conf, openstackclient_db_mq, keystone, glance,
-            nova, docker, docker_glance, fpga_files, fpga_db,
+            docker, docker_glance, nova, fpga_files, fpga_db,
             nova_scheduler_filter, flavor_and_image, horizon]
     compute1-mitaka:
         ips: [192.168.1.14, 192.168.56.14]

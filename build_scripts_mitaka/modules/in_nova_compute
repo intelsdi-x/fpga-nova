@@ -60,7 +60,7 @@ password = NOVA_PASS
 lock_path = /var/lib/nova/tmp
 
 [glance]
-host = http://CONTROLLER_HOSTNAME:9292
+api_servers = http://CONTROLLER_HOSTNAME:9292
 EOF
 
 service nova-compute restart
