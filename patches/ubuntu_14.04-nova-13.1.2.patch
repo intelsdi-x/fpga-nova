@@ -674,23 +674,21 @@ index 0000000..b0d93e7
 +        LOG.debug("Erasing FPGA succeeded.")
 +
 +    return erase_result
-diff --git a/objects/block_device.py b/objects/block_device.py
-index b671975..156c139 100644
---- a/objects/block_device.py
-+++ b/objects/block_device.py
-@@ -303,6 +303,7 @@ class BlockDeviceMappingList(base.ObjectListBase, base.NovaObject):
-     # Version 1.15: BlockDeviceMapping <= version 1.14
-     # Version 1.16: BlockDeviceMapping <= version 1.15
-     # Version 1.17: Add get_by_instance_uuids()
-+
-     VERSION = '1.17'
- 
-     fields = {
 diff --git a/objects/compute_node.py b/objects/compute_node.py
-index a4f99e1..f7a50f1 100644
+index a4f99e1..14abae6 100644
 --- a/objects/compute_node.py
 +++ b/objects/compute_node.py
-@@ -94,6 +94,8 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject,
+@@ -53,7 +53,8 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject,
+     # Version 1.14: Added cpu_allocation_ratio and ram_allocation_ratio
+     # Version 1.15: Added uuid
+     # Version 1.16: Added disk_allocation_ratio
+-    VERSION = '1.16'
++    # Version 1.17: Added fpga_regions and fpga_regions_used
++    VERSION = '1.17'
+ 
+     fields = {
+         'id': fields.IntegerField(read_only=True),
+@@ -94,6 +95,8 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject,
          'cpu_allocation_ratio': fields.FloatField(),
          'ram_allocation_ratio': fields.FloatField(),
          'disk_allocation_ratio': fields.FloatField(),
@@ -699,7 +697,7 @@ index a4f99e1..f7a50f1 100644
          }
  
      def obj_make_compatible(self, primitive, target_version):
-@@ -205,6 +207,10 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject,
+@@ -205,6 +208,10 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject,
                      if value == 0.0 and key == 'disk_allocation_ratio':
                          # It's not specified either on the controller
                          value = 1.0
@@ -710,7 +708,7 @@ index a4f99e1..f7a50f1 100644
              compute[key] = value
  
          stats = db_compute['stats']
-@@ -351,7 +357,8 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject,
+@@ -351,7 +358,8 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject,
                  "vcpus_used", "memory_mb_used", "local_gb_used",
                  "numa_topology", "hypervisor_type",
                  "hypervisor_version", "hypervisor_hostname",
@@ -720,67 +718,12 @@ index a4f99e1..f7a50f1 100644
          for key in keys:
              if key in resources:
                  self[key] = resources[key]
-@@ -380,7 +387,7 @@ class ComputeNodeList(base.ObjectListBase, base.NovaObject):
-     # Version 1.12 ComputeNode version 1.12
-     # Version 1.13 ComputeNode version 1.13
-     # Version 1.14 ComputeNode version 1.14
--    VERSION = '1.14'
-+    VERSION = '1.15'
-     fields = {
-         'objects': fields.ListOfObjectsField('ComputeNode'),
-         }
-diff --git a/objects/fixed_ip.py b/objects/fixed_ip.py
-index 93dfe29..06c02dc 100644
---- a/objects/fixed_ip.py
-+++ b/objects/fixed_ip.py
-@@ -46,7 +46,8 @@ class FixedIP(obj_base.NovaPersistentObject, obj_base.NovaObject,
-     # Version 1.12: Instance 1.22, FloatingIPList 1.9
-     # Version 1.13: Instance 1.23, FloatingIPList 1.10
-     # Version 1.14: Added vif_id kwarg to associate(_pool), FloatingIPList 1.11
--    VERSION = '1.14'
-+    # Version 1:15 Instance 1.24
-+    VERSION = '1.15'
- 
-     fields = {
-         'id': fields.IntegerField(),
-@@ -219,7 +220,8 @@ class FixedIPList(obj_base.ObjectListBase, obj_base.NovaObject):
-     # Version 1.12: FixedIP <= version 1.12
-     # Version 1.13: FixedIP <= version 1.13
-     # Version 1.14: FixedIP <= version 1.14
--    VERSION = '1.14'
-+    # Version 1.14: FixedIP <= version 1.15
-+    VERSION = '1.15'
- 
-     fields = {
-         'objects': fields.ListOfObjectsField('FixedIP'),
-diff --git a/objects/floating_ip.py b/objects/floating_ip.py
-index 719dbe3..65004b6 100644
---- a/objects/floating_ip.py
-+++ b/objects/floating_ip.py
-@@ -36,7 +36,8 @@ class FloatingIP(obj_base.NovaPersistentObject, obj_base.NovaObject,
-     # Version 1.8: FixedIP <= version 1.12
-     # Version 1.9: FixedIP <= version 1.13
-     # Version 1.10: FixedIP <= version 1.14
--    VERSION = '1.10'
-+    # Version 1.10: FixedIP <= version 1.15
-+    VERSION = '1.11'
-     fields = {
-         'id': fields.IntegerField(),
-         'address': fields.IPAddressField(),
-@@ -173,6 +174,7 @@ class FloatingIPList(obj_base.ObjectListBase, obj_base.NovaObject):
-     # Version 1.9: FloatingIP 1.8
-     # Version 1.10: FloatingIP 1.9
-     # Version 1.11: FloatingIP 1.10
-+    # Version 1.11: FloatingIP 1.11
-     fields = {
-         'objects': fields.ListOfObjectsField('FloatingIP'),
-         }
 diff --git a/objects/fpga_device.py b/objects/fpga_device.py
 new file mode 100644
-index 0000000..713bbe1
+index 0000000..0cbcd18
 --- /dev/null
 +++ b/objects/fpga_device.py
-@@ -0,0 +1,255 @@
+@@ -0,0 +1,254 @@
 +# Copyright 2016 Intel Corporation
 +#
 +# Licensed under the Apache License, Version 2.0 (the "License");
@@ -1018,7 +961,6 @@ index 0000000..713bbe1
 +    VERSION = '1.0'
 +
 +    fields = {'objects': fields.ListOfObjectsField('FpgaDevice')}
-+    obj_relationships = {'objects': [('1.0', '1.0')]}
 +
 +    def __init__(self, *args, **kwargs):
 +        super(FpgaDeviceList, self).__init__(*args, **kwargs)
@@ -1038,10 +980,10 @@ index 0000000..713bbe1
 +                                  db_dev_list)
 diff --git a/objects/fpga_device_pool.py b/objects/fpga_device_pool.py
 new file mode 100644
-index 0000000..c1e18d0
+index 0000000..c33a4ac
 --- /dev/null
 +++ b/objects/fpga_device_pool.py
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,76 @@
 +# Copyright (c) 2014 Hewlett-Packard Development Company, L.P.
 +# All Rights Reserved.
 +#
@@ -1092,7 +1034,6 @@ index 0000000..c1e18d0
 +    # Version 1.0: Initial version
 +    VERSION = '1.0'
 +    fields = {'objects': fields.ListOfObjectsField('FpgaDevicePool')}
-+    obj_relationships = {'objects': [('1.0', '1.0')]}
 +
 +
 +def from_fpga_stats(fpga_stats):
@@ -1120,10 +1061,20 @@ index 0000000..c1e18d0
 +            pools = objects.FpgaDevicePoolList(objects=pool_list)
 +    return pools
 diff --git a/objects/image_meta.py b/objects/image_meta.py
-index 72a16dc..605a999 100644
+index 72a16dc..0a3fe7b 100644
 --- a/objects/image_meta.py
 +++ b/objects/image_meta.py
-@@ -313,6 +313,9 @@ class ImageMetaProps(base.NovaObject):
+@@ -161,7 +161,8 @@ class ImageMetaProps(base.NovaObject):
+     # Version 1.10: added hw_cpu_realtime_mask field
+     # Version 1.11: Added hw_firmware_type field
+     # Version 1.12: Added properties for image signature verification
+-    VERSION = '1.12'
++    # Version 1.13: Added hw_fpga_ip_id
++    VERSION = '1.13'
+ 
+     def obj_make_compatible(self, primitive, target_version):
+         super(ImageMetaProps, self).obj_make_compatible(primitive,
+@@ -313,6 +314,9 @@ class ImageMetaProps(base.NovaObject):
          # boolean - If true, this will enable the virtio-multiqueue feature
          'hw_vif_multiqueue_enabled': fields.FlexibleBooleanField(),
  
@@ -1134,10 +1085,20 @@ index 72a16dc..605a999 100644
          'img_bittorrent': fields.FlexibleBooleanField(),
  
 diff --git a/objects/instance.py b/objects/instance.py
-index e759fb5..390c2d2 100644
+index e759fb5..6caa55f 100644
 --- a/objects/instance.py
 +++ b/objects/instance.py
-@@ -186,7 +186,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
+@@ -88,7 +88,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
+                base.NovaObjectDictCompat):
+     # Version 2.0: Initial version
+     # Version 2.1: Added services
+-    VERSION = '2.1'
++    # Version 2.2: Added fpga_device
++    VERSION = '2.2'
+ 
+     fields = {
+         'id': fields.IntegerField(),
+@@ -186,7 +187,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
          'vcpu_model': fields.ObjectField('VirtCPUModel', nullable=True),
          'ec2_ids': fields.ObjectField('EC2Ids'),
          'migration_context': fields.ObjectField('MigrationContext',
@@ -1147,38 +1108,6 @@ index e759fb5..390c2d2 100644
          }
  
      obj_extra_fields = ['name']
-diff --git a/objects/request_spec.py b/objects/request_spec.py
-index 573d96c..b01ba8a 100644
---- a/objects/request_spec.py
-+++ b/objects/request_spec.py
-@@ -476,6 +476,7 @@ class SchedulerRetries(base.NovaObject):
-         'hosts': fields.ObjectField('ComputeNodeList'),
-     }
- 
-+
-     @classmethod
-     def from_dict(cls, context, retry_dict):
-         # NOTE(sbauza): We are not persisting the user context since it's only
-diff --git a/objects/service.py b/objects/service.py
-index aea839c..3c9b3e9 100644
---- a/objects/service.py
-+++ b/objects/service.py
-@@ -379,6 +379,15 @@ class ServiceList(base.ObjectListBase, base.NovaObject):
-     fields = {
-         'objects': fields.ListOfObjectsField('Service'),
-         }
-+    # NOTE(danms): Service was at 1.2 before we added this
-+    obj_relationships = {
-+        'objects': [('1.0', '1.2'), ('1.1', '1.3'), ('1.2', '1.4'),
-+                    ('1.3', '1.5'), ('1.4', '1.6'), ('1.5', '1.7'),
-+                    ('1.6', '1.8'), ('1.7', '1.9'), ('1.8', '1.10'),
-+                    ('1.9', '1.11'), ('1.10', '1.12'), ('1.11', '1.13'),
-+                    ('1.12', '1.14'), ('1.13', '1.15'), ('1.14', '1.16'),
-+                    ('1.15', '1.17'), ('1.16', '1.18'), ('1.17', '1.19')],
-+    }
- 
-     @base.remotable_classmethod
-     def get_by_topic(cls, context, topic):
 diff --git a/scheduler/filters/fpga_filter.py b/scheduler/filters/fpga_filter.py
 new file mode 100644
 index 0000000..388e854
