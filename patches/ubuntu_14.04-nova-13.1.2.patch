@@ -421,10 +421,10 @@ index 84b85f5..0000000
 Binary files a/db/sqlalchemy/migrate_repo/versions/304_placeholder.pyc and /dev/null differ
 diff --git a/db/sqlalchemy/migrate_repo/versions/305_add_fpga_devices_table.py b/db/sqlalchemy/migrate_repo/versions/305_add_fpga_devices_table.py
 new file mode 100644
-index 0000000..92e6601
+index 0000000..f2f6c44
 --- /dev/null
 +++ b/db/sqlalchemy/migrate_repo/versions/305_add_fpga_devices_table.py
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,52 @@
 +# Copyright 2012 OpenStack Foundation
 +#
 +#    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -448,37 +448,35 @@ index 0000000..92e6601
 +    meta = MetaData()
 +    meta.bind = migrate_engine
 +
++    tablename = 'fpga_devices'
++    if migrate_engine.has_table(tablename):
++        return
++
++    compute_node_ix = ('ix_%s_compute_node_id' %
++                       tablename)
++    instance_uuid_ix = ('ix_%s_instance_uuid' %
++                        tablename)
++
 +    fpga_devices_uc_name = ('uniq_fpga_devices0compute_node_id0'
-+                            'accelerator_ip0deleted')
-+    for prefix in ('', 'shadow_'):
-+        basename = prefix + 'fpga_devices'
-+        if migrate_engine.has_table(basename):
-+            continue
++                            'accelerator_ip')
 +
-+        compute_node_ix = ('ix_%s_compute_node_id_deleted' %
-+                           basename)
-+        instance_uuid_ix = ('ix_%s_instance_uuid_deleted' %
-+                            basename)
++    fpga_devices = Table(tablename, meta,
++                         Column('created_at', DateTime(timezone=False)),
++                         Column('updated_at', DateTime(timezone=False)),
++                         Column('id', Integer, primary_key=True),
++                         Column('compute_node_id', Integer, nullable=False),
++                         Column('status', String(36), nullable=False),
++                         Column('accelerator_ip', String(255), nullable=True),
++                         Column('instance_uuid', String(36), nullable=True),
++                         Column('request_id', String(36), nullable=True),
++                         Index(compute_node_ix, 'compute_node_id'),
++                         Index(instance_uuid_ix, 'instance_uuid'),
++                         UniqueConstraint('compute_node_id', 'accelerator_ip',
++                                          name=fpga_devices_uc_name),
++                         mysql_engine='InnoDB',
++                         mysql_charset='utf8')
 +
-+        fpga_devices = Table(basename, meta,
-+            Column('created_at', DateTime(timezone=False)),
-+            Column('updated_at', DateTime(timezone=False)),
-+            Column('deleted_at', DateTime(timezone=False)),
-+            Column('deleted', Integer, nullable=False, default=0),
-+            Column('id', Integer, primary_key=True),
-+            Column('compute_node_id', Integer, nullable=False),
-+            Column('status', String(36), nullable=False),
-+            Column('accelerator_ip', String(255), nullable=True),
-+            Column('instance_uuid', String(36), nullable=True),
-+            Column('request_id', String(36), nullable=True),
-+            Index(compute_node_ix, 'compute_node_id', 'deleted'),
-+            Index(instance_uuid_ix, 'instance_uuid', 'deleted'),
-+            UniqueConstraint('compute_node_id', 'accelerator_ip', 'deleted',
-+                             name=fpga_devices_uc_name),
-+            mysql_engine='InnoDB',
-+            mysql_charset='utf8')
-+
-+        fpga_devices.create()
++    fpga_devices.create()
 diff --git a/db/sqlalchemy/migrate_repo/versions/305_placeholder.py b/db/sqlalchemy/migrate_repo/versions/305_placeholder.py
 deleted file mode 100644
 index 50ff45b..0000000
@@ -512,7 +510,7 @@ deleted file mode 100644
 index 41d39c7..0000000
 Binary files a/db/sqlalchemy/migrate_repo/versions/305_placeholder.pyc and /dev/null differ
 diff --git a/db/sqlalchemy/models.py b/db/sqlalchemy/models.py
-index a133352..d365fc7 100644
+index a133352..8535bff 100644
 --- a/db/sqlalchemy/models.py
 +++ b/db/sqlalchemy/models.py
 @@ -178,6 +178,10 @@ class ComputeNode(BASE, NovaBase, models.SoftDeleteMixin):
@@ -526,7 +524,7 @@ index a133352..d365fc7 100644
  
  class Certificate(BASE, NovaBase, models.SoftDeleteMixin):
      """Represents a x509 certificate."""
-@@ -342,6 +346,35 @@ class Instance(BASE, NovaBase, models.SoftDeleteMixin):
+@@ -342,6 +346,31 @@ class Instance(BASE, NovaBase, models.SoftDeleteMixin):
      # Records whether an instance has been deleted from disk
      cleaned = Column(Integer, default=0)
  
@@ -534,25 +532,21 @@ index a133352..d365fc7 100644
 +    fpga_device = Column(String(255))
 +
 +
-+class FpgaDevice(BASE, NovaBase, models.SoftDeleteMixin):
++class FpgaDevice(BASE, NovaBase):
 +    """ Represents FPGA device. """
 +    __tablename__ = 'fpga_devices'
 +    fpga_devices_uc_name = ('uniq_fpga_devices0compute_node_id0'
-+                            'accelerator_ip0deleted')
++                            'accelerator_ip')
 +    __table_args__ = (
-+        Index('ix_fpga_devices_compute_node_id_deleted',
-+              'compute_node_id', 'deleted'),
-+        Index('ix_fpga_devices_instance_uuid_deleted',
-+              'instance_uuid', 'deleted'),
++        Index('ix_fpga_devices_compute_node_id', 'compute_node_id'),
++        Index('ix_fpga_devices_instance_uuid', 'instance_uuid'),
 +        schema.UniqueConstraint(
-+            'compute_node_id', 'accelerator_ip', 'deleted',
++            'compute_node_id', 'accelerator_ip',
 +            name=fpga_devices_uc_name),)
 +
 +    id = Column(Integer, primary_key=True)
 +    created_at = Column(DateTime)
 +    updated_at = Column(DateTime)
-+    deleted_at = Column(DateTime)
-+    deleted = Column(Integer, nullable=False, default=0)
 +    compute_node_id = Column(Integer, nullable=False)
 +    status = Column(String(36), nullable=False)
 +    accelerator_ip = Column(String(255), nullable=True)
@@ -1110,10 +1104,10 @@ index e759fb5..6caa55f 100644
      obj_extra_fields = ['name']
 diff --git a/scheduler/filters/fpga_filter.py b/scheduler/filters/fpga_filter.py
 new file mode 100644
-index 0000000..388e854
+index 0000000..a08f868
 --- /dev/null
 +++ b/scheduler/filters/fpga_filter.py
-@@ -0,0 +1,58 @@
+@@ -0,0 +1,59 @@
 +# Copyright 2016, OpenStack Foundation
 +# All Rights Reserved.
 +#
@@ -1137,6 +1131,7 @@ index 0000000..388e854
 +
 +    def host_passes(self, host_state, req_spec):
 +        """Return True if host has an free FPGA region available"""
++
 +        image_props = req_spec.image.properties
 +        extra_specs = req_spec.flavor.extra_specs
 +
@@ -1302,7 +1297,7 @@ index 337fc37..2065301 100644
                          context, objects.ComputeNode(), cn)
                      for cn in fake_compute_nodes]
 diff --git a/tests/unit/compute/test_compute_mgr.py b/tests/unit/compute/test_compute_mgr.py
-index d7ff03c..b2bbe87 100644
+index d7ff03c..53bf597 100644
 --- a/tests/unit/compute/test_compute_mgr.py
 +++ b/tests/unit/compute/test_compute_mgr.py
 @@ -240,6 +240,42 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
@@ -1374,6 +1369,15 @@ index d7ff03c..b2bbe87 100644
 +            self.filter_properties, request_spec={})
          mock_cleanup_network.assert_called_once_with(
              self.context, instance, self.compute.host)
+         mock_build_ins.assert_called_once_with(self.context,
+@@ -3378,7 +3414,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+             self.image, self.injected_files, self.admin_pass,
+             self.requested_networks, self.security_groups,
+             self.block_device_mapping, self.node, self.limits,
+-            self.filter_properties)
++            self.filter_properties, request_spec={})
+         mock_cleanup_network.assert_called_once_with(
+             self.context, instance, self.requested_networks)
          mock_build_ins.assert_called_once_with(self.context,
 @@ -3400,7 +3436,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                  self.image, self.injected_files, self.admin_pass,
@@ -1510,7 +1514,7 @@ index bfc11fa..ee4f5d5 100644
                  return_value=objects.InstancePCIRequests(requests=[]))
      def test_claim_sets_instance_host_and_node(self, mock_get):
 diff --git a/tests/unit/db/test_db_api.py b/tests/unit/db/test_db_api.py
-index cb50fc9..41a7ece 100644
+index cb50fc9..f5dac2c 100644
 --- a/tests/unit/db/test_db_api.py
 +++ b/tests/unit/db/test_db_api.py
 @@ -7437,7 +7437,8 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
@@ -1523,11 +1527,21 @@ index cb50fc9..41a7ece 100644
          # add some random stats
          self.stats = dict(num_instances=3, num_proj_12345=2,
                       num_proj_23456=2, num_vm_building=3)
+@@ -8603,7 +8604,8 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
+             # with no shadow table and it's OK, so skip.
+             # 318 adds one more: 'resource_provider_aggregates'.
+             if table_name in ['tags', 'resource_providers', 'allocations',
+-                              'inventories', 'resource_provider_aggregates']:
++                              'inventories', 'resource_provider_aggregates',
++                              'fpga_devices']:
+                 continue
+ 
+             if table_name.startswith("shadow_"):
 diff --git a/tests/unit/db/test_migrations.py b/tests/unit/db/test_migrations.py
-index d99cbd2..772750f 100644
+index d99cbd2..7b74c8f 100644
 --- a/tests/unit/db/test_migrations.py
 +++ b/tests/unit/db/test_migrations.py
-@@ -802,6 +802,25 @@ class NovaMigrationsCheckers(test_migrations.ModelsMigrationsSync,
+@@ -802,6 +802,23 @@ class NovaMigrationsCheckers(test_migrations.ModelsMigrationsSync,
          self.assertIndexMembers(engine, 'instance_system_metadata',
                                  'instance_uuid', ['instance_uuid'])
  
@@ -1544,11 +1558,9 @@ index d99cbd2..772750f 100644
 +
 +    def _check_305(self, engine, data):
 +        self.assertColumnExists(engine, 'fpga_devices', 'instance_uuid')
-+        self.assertColumnExists(engine, 'shadow_fpga_devices',
-+                                'instance_uuid')
 +        self.assertIndexMembers(engine, 'fpga_devices',
-+                                'ix_fpga_devices_instance_uuid_deleted',
-+                                ['instance_uuid', 'deleted'])
++                                'ix_fpga_devices_instance_uuid',
++                                ['instance_uuid'])
 +
      def _check_313(self, engine, data):
  
@@ -1558,7 +1570,7 @@ new file mode 100644
 index 0000000..e69de29
 diff --git a/tests/unit/fpga/test_fpga.py b/tests/unit/fpga/test_fpga.py
 new file mode 100644
-index 0000000..62bfcb5
+index 0000000..66b9a46
 --- /dev/null
 +++ b/tests/unit/fpga/test_fpga.py
 @@ -0,0 +1,160 @@
@@ -1597,12 +1609,12 @@ index 0000000..62bfcb5
 +
 +    def test_get_ip_image_id_from_image_metadata(self):
 +        request_spec = {
-+            'image': {'properties': {'hw:fpga_ip_id': 'accelerator_ip'}}}
++            'image': {'properties': {'hw_fpga_ip_id': 'accelerator_ip'}}}
 +        self.assertEqual('accelerator_ip', fpga.get_ip_image_id(request_spec))
 +
 +    def test_get_ip_image_id_image_precedes(self):
 +        request_spec = {
-+            'image': {'properties': {'hw:fpga_ip_id': 'id_from_image'}},
++            'image': {'properties': {'hw_fpga_ip_id': 'id_from_image'}},
 +            'instance_type': {'extra_specs':
 +                            {'hw:fpga_ip_id': 'id_from_flavor'}}}
 +        self.assertEqual('id_from_image', fpga.get_ip_image_id(request_spec))
@@ -1736,20 +1748,29 @@ index 53dd57a..132b649 100644
  # FIXME(sbauza) : For compatibility checking, to be removed once we are sure
  # that all computes are running latest DB version with host field in it.
 diff --git a/tests/unit/objects/test_objects.py b/tests/unit/objects/test_objects.py
-index 199e351..dfc1625 100644
+index 199e351..38b2342 100644
 --- a/tests/unit/objects/test_objects.py
 +++ b/tests/unit/objects/test_objects.py
-@@ -1120,8 +1120,8 @@ object_data = {
-     'FixedIPList': '1.14-87a39361c8f08f059004d6b15103cdfd',
-     'Flavor': '1.1-b6bb7a730a79d720344accefafacf7ee',
-     'FlavorList': '1.1-52b5928600e7ca973aa4fc1e46f3934c',
--    'FloatingIP': '1.10-52a67d52d85eb8b3f324a5b7935a335b',
--    'FloatingIPList': '1.11-7f2ba670714e1b7bab462ab3290f7159',
-+    'FloatingIP': '1.11-52a67d52d85eb8b3f324a5b7935a335b',
-+    'FloatingIPList': '1.12-7f2ba670714e1b7bab462ab3290f7159',
-     'HostMapping': '1.0-1a3390a696792a552ab7bd31a77ba9ac',
+@@ -1107,7 +1107,7 @@ object_data = {
+     'BlockDeviceMappingList': '1.17-1e568eecb91d06d4112db9fd656de235',
+     'BuildRequest': '1.0-e4ca475cabb07f73d8176f661afe8c55',
+     'CellMapping': '1.0-7f1a7e85a22bbb7559fc730ab658b9bd',
+-    'ComputeNode': '1.16-2436e5b836fa0306a3c4e6d9e5ddacec',
++    'ComputeNode': '1.17-0b99b9d63197845ba019e9d34b4315ae',
+     'ComputeNodeList': '1.14-3b6f4f5ade621c40e70cb116db237844',
+     'DNSDomain': '1.0-7b0b2dab778454b6a7b6c66afe163a1a',
+     'DNSDomainList': '1.0-4ee0d9efdfd681fed822da88376e04d2',
+@@ -1126,8 +1126,8 @@ object_data = {
      'HyperVLiveMigrateData': '1.0-0b868dd6228a09c3f3e47016dddf6a1c',
      'HVSpec': '1.2-db672e73304da86139086d003f3977e7',
+     'ImageMeta': '1.8-642d1b2eb3e880a367f37d72dd76162d',
+-    'ImageMetaProps': '1.12-6a132dee47931447bf86c03c7006d96c',
+-    'Instance': '2.1-416fdd0dfc33dfa12ff2cfdd8cc32e17',
++    'ImageMetaProps': '1.13-dadc7f34c011a15ceb341ccf10f24856',
++    'Instance': '2.2-4f19e099bf0fd83676be061e0707acdf',
+     'InstanceAction': '1.1-f9f293e526b66fca0d05c3b3a2d13914',
+     'InstanceActionEvent': '1.1-e56a64fa4710e43ef7af2ad9d6028b33',
+     'InstanceActionEventList': '1.1-13d92fb953030cdbfee56481756e02be',
 diff --git a/tests/unit/scheduler/fakes.py b/tests/unit/scheduler/fakes.py
 index 32e7907..22fd126 100644
 --- a/tests/unit/scheduler/fakes.py
@@ -1792,10 +1813,10 @@ index 32e7907..22fd126 100644
              id=5, local_gb=1024, memory_mb=1024, vcpus=1,
 diff --git a/tests/unit/scheduler/filters/test_fpga_filter.py b/tests/unit/scheduler/filters/test_fpga_filter.py
 new file mode 100644
-index 0000000..b3e4b0a
+index 0000000..4e2828c
 --- /dev/null
 +++ b/tests/unit/scheduler/filters/test_fpga_filter.py
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,61 @@
 +# Copyright 2016, OpenStack Foundation
 +# All Rights Reserved.
 +#
@@ -1811,56 +1832,52 @@ index 0000000..b3e4b0a
 +# See the License for the specific language governing permissions and
 +# limitations under the License.
 +
-+from nova.scheduler.filters import fpga_filter
++from nova import objects
 +from nova import test
++from nova.scheduler.filters import fpga_filter
 +from nova.tests.unit.scheduler import fakes
 +
 +
 +class TestFpgaFilter(test.NoDBTestCase):
 +
-+    def test_fpga_filter_passes_image_properties_matched(self):
++    def setUp(self):
++        super(TestFpgaFilter, self).setUp()
 +        self.filt_cls = fpga_filter.FpgaFilter()
-+        filter_properties = {'request_spec': {
-+            'image': {'properties': {
-+                'fpga': 'accelerator_id'}}}}
 +
-+        host = fakes.FakeHostState('host1', 'node1',
-+                {'fpga_regions': 2, 'fpga_regions_used': 0})
-+
-+        self.assertTrue(self.filt_cls.host_passes(host, filter_properties))
++    def test_fpga_filter_passes_image_properties_matched(self):
++        host = self._create_host_state(fpga_regions=2, fpga_regions_used=0)
++        spec = self._create_spec(extra_specs={},
++                                 hw_fpga_ip_id='accelerator_id')
++        self.assertTrue(self.filt_cls.host_passes(host, spec))
 +
 +    def test_fpga_filter_passes_flavor_specs_matched(self):
-+        self.filt_cls = fpga_filter.FpgaFilter()
-+        filter_properties = {'request_spec': {
-+            'instance_type': {'extra_specs': {
-+                'hw:fpga_ip_id': 'accelerator_id'}}}}
-+
-+        host = fakes.FakeHostState('host1', 'node1',
-+                {'fpga_regions': 2, 'fpga_regions_used': 0})
-+
-+        self.assertTrue(self.filt_cls.host_passes(host, filter_properties))
++        host = self._create_host_state(fpga_regions=2, fpga_regions_used=0)
++        extra_specs = {'hw:fpga_ip_id': 'accelerator_id'}
++        spec = self._create_spec(extra_specs=extra_specs)
++        self.assertTrue(self.filt_cls.host_passes(host, spec))
 +
 +    def test_fpga_filter_fails_no_free_fpga_regions(self):
-+        self.filt_cls = fpga_filter.FpgaFilter()
-+        filter_properties = {'request_spec': {
-+            'instance_type': {'extra_specs': {
-+                'hw:fpga_ip_id': 'accelerator_id'}}}}
-+
-+        host = fakes.FakeHostState('host1', 'node1',
-+                {'fpga_regions': 2, 'fpga_regions_used': 2})
-+
-+        self.assertFalse(self.filt_cls.host_passes(host, filter_properties))
++        host = self._create_host_state(fpga_regions=2, fpga_regions_used=2)
++        extra_specs = {'hw:fpga_ip_id': 'accelerator_id'}
++        spec = self._create_spec(extra_specs=extra_specs)
++        self.assertFalse(self.filt_cls.host_passes(host, spec))
 +
 +    def test_fpga_filter_passes_no_fpga_property(self):
-+        self.filt_cls = fpga_filter.FpgaFilter()
-+        filter_properties = {'request_spec': {
-+            'instance_type': {'extra_specs': {'some_key': ''}},
-+            'image': {'properties': {'some_key': ''}}}}
++        host = self._create_host_state(fpga_regions=2, fpga_regions_used=0)
++        spec = self._create_spec(extra_specs={'some_key': ''},
++                                 hw_video_ram=123)
++        self.assertTrue(self.filt_cls.host_passes(host, spec))
 +
-+        host = fakes.FakeHostState('host1', 'node1',
-+                {'fpga_regions': 2, 'fpga_regions_used': 0})
++    def _create_spec(self, extra_specs, **image_properties):
++        flavor = objects.Flavor(extra_specs=extra_specs)
++        properties = objects.ImageMetaProps(**image_properties)
++        image = objects.ImageMeta(properties=properties)
++        return objects.RequestSpec(flavor=flavor, image=image)
 +
-+        self.assertTrue(self.filt_cls.host_passes(host, filter_properties))
++    def _create_host_state(self, fpga_regions, fpga_regions_used):
++        return fakes.FakeHostState('host1', 'node1',
++                                   {'fpga_regions': fpga_regions,
++                                    'fpga_regions_used': fpga_regions_used})
 diff --git a/tests/unit/scheduler/test_host_manager.py b/tests/unit/scheduler/test_host_manager.py
 index d6e7b13..b9a4805 100644
 --- a/tests/unit/scheduler/test_host_manager.py
