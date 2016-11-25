@@ -1,0 +1,13 @@
+#!/bin/bash
+set -x
+
+cat /etc/nova/nova.conf | awk '/\[DEFAULT\]/ { print; print "scheduler_default_filters = RamFilter,ComputeFilter,AvailabilityZoneFilter,ImagePropertiesFilter,FpgaFilter"; next }1' > nova.conf
+mv nova.conf /etc/nova/nova.conf
+cat /etc/nova/nova.conf | awk '/\[DEFAULT\]/ { print; print "scheduler_available_filters = nova.scheduler.filters.fpga_filter.FpgaFilter"; next }1' > nova.conf
+mv nova.conf /etc/nova/nova.conf
+cat /etc/nova/nova.conf | awk '/\[DEFAULT\]/ { print; print "scheduler_available_filters = nova.scheduler.filters.all_filters"; next }1' > nova.conf
+mv nova.conf /etc/nova/nova.conf
+
+service nova-api restart
+service nova-scheduler restart
+service nova-conductor restart

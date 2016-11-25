@@ -1,0 +1,34 @@
+# Example of simple 3 node setup for FPGA enabled Newton Openstack on Ubuntu
+# 16.04 server.
+config:
+    ADMIN__OS_PROJECT_DOMAIN_NAME: default
+    ADMIN__OS_USER_DOMAIN_NAME: default
+    ADMIN__OS_PROJECT_NAME: admin
+    ADMIN__OS_USERNAME: admin
+    ADMIN__OS_PASSWORD: admin
+    ADMIN__OS_IDENTITY_API_VERSION: 3
+    ADMIN__OS_IMAGE_API_VERSION: 2
+    DEMO__OS_PROJECT_DOMAIN_NAME: default
+    DEMO__OS_USER_DOMAIN_NAME: default
+    DEMO__OS_PROJECT_NAME: demo
+    DEMO__OS_USERNAME: demo
+    DEMO__OS_PASSWORD: demo
+    DEMO__OS_IDENTITY_API_VERSION: 3
+    DEMO__OS_IMAGE_API_VERSION: 2
+nodes:
+    controller-newton:
+        ips: [192.168.1.23, 192.168.56.23]
+        role: controller
+        modules: [provision_conf, openstackclient_db_mq, keystone, glance,
+            docker, docker_glance, nova, fpga_files, fpga_db,
+            nova_scheduler_filter, flavor_and_image, horizon]
+    compute1-newton:
+        ips: [192.168.1.24, 192.168.56.24]
+        role: compute
+        modules: [provision_conf, nova_compute, docker, nova_docker,
+            nova_docker_patches, fpga_files, fpga_exec]
+    compute2-newton:
+        ips: [192.168.1.25, 192.168.56.25]
+        role: compute
+        modules: [provision_conf, nova_compute, docker, nova_docker,
+            fpga_files]

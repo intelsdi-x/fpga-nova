@@ -1,0 +1,8 @@
+#!/bin/bash
+set -x
+
+service apache2 stop
+service nova-cert stop
+service nova-consoleauth stop
+service nova-novncproxy stop
+apt-get -y --force-yes purge nova-cert nova-consoleauth nova-novncproxy openstack-dashboard

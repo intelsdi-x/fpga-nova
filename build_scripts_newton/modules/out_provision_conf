@@ -1,0 +1,6 @@
+#!/bin/bash
+set -x
+
+apt-get -y --force-yes purge chrony
+add-apt-repository -y --remove cloud-archive:newton
+apt-get update && apt-get -y --force-yes dist-upgrade

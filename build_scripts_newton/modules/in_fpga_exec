@@ -1,0 +1,20 @@
+#!/bin/bash
+set -x
+
+if [ ! -d fpga-nova ]; then
+    git clone -b dev https://github.com/intelsdi-x/fpga-nova
+    if [ $? != 0 ]; then
+        echo Failure in getting fpga-nova repository
+        exit
+    fi
+fi
+
+fpga_exec="/usr/bin/fpga-cli"
+
+echo "fpga_access = True" >> /etc/nova/nova-compute.conf
+echo "fpga_exec = ${fpga_exec##*/}" >> /etc/nova/nova-compute.conf
+
+cp -a fpga-nova/bin/fpga-cli.py $fpga_exec
+
+echo "${fpga_exec##*/}: CommandFilter, ${fpga_exec##*/}, root" >> /etc/nova/rootwrap.d/compute.filters
+echo "${fpga_exec##*/}: CommandFilter, ${fpga_exec##*/}, root" >> /etc/nova/rootwrap.d/network.filters
