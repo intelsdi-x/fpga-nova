@@ -1,7 +1,7 @@
 #!/bin/bash
 set -x
 
-git clone https://github.com/openstack/nova-docker -b stable/mitaka
+git clone https://github.com/openstack/nova-docker
 cd nova-docker
 pip install .
 cd -

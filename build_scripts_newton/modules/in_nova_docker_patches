@@ -9,11 +9,11 @@ if [ ! -d fpga-nova ]; then
     fi
 fi
 
-git clone https://github.com/openstack/nova-docker -b stable/mitaka
+git clone https://github.com/openstack/nova-docker
 
 cd nova-docker
 pip uninstall -y nova-docker
-patch -Np1 -i ../fpga-nova/patches/nova_docker_mitaka.patch
+patch -Np1 -i ../fpga-nova/patches/nova_docker_newton.patch
 pip install .
 cd -
 

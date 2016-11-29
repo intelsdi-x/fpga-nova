@@ -34,30 +34,20 @@ lock_path=/var/lock/nova
 force_dhcp_release=True
 libvirt_use_virtio_for_bridges=True
 verbose=True
+debug=True
 ec2_private_dns_show_ip=True
 api_paste_config=/etc/nova/api-paste.ini
-# enabled_apis=osapi_compute,metadata
-
 auth_strategy = keystone
 my_ip = AAA.BBB.CCC.DDD
-# rpc_backend = rabbit
 verbose = True
-
-network_api_class = nova.network.api.API
-security_group_api = nova
-
-transport_url = rabiit://openstack:RABIT_PASS@CONTROLLER_HOSTNAME
+use_neutron = False
+transport_url = rabbit://openstack:RABBIT_PASS@CONTROLLER_HOSTNAME
 
 [api_database]
 connection = mysql+pymysql://nova:NOVA_DBPASS@CONTROLLER_HOSTNAME/nova_api
 
 [database]
 connection = mysql+pymysql://nova:NOVA_DBPASS@CONTROLLER_HOSTNAME/nova
-
-# [oslo_messaging_rabbit]
-# rabbit_host = CONTROLLER_HOSTNAME
-# rabbit_userid = openstack
-# rabbit_password = RABBIT_PASS
 
 [keystone_authtoken]
 auth_uri = http://CONTROLLER_HOSTNAME:5000

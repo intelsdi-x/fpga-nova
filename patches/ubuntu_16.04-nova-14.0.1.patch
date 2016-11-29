@@ -1,5 +1,5 @@
 diff --git a/compute/claims.py b/compute/claims.py
-index d1c73a7..64474f3 100644
+index d1c73a7..1f23759 100644
 --- a/compute/claims.py
 +++ b/compute/claims.py
 @@ -75,13 +75,14 @@ class Claim(NopClaim):
@@ -41,8 +41,8 @@ index d1c73a7..64474f3 100644
                  return _('Claim pci failed.')
  
 +    def _test_fpga(self, resources, limit):
-+        total = resources.get('fpga_regions', 0)
-+        used = resources.get('fpga_regions_used', 0)
++        total = resources.fpga_regions
++        used = resources.fpga_regions_used
 +        requested = 1 if self._fpga_ip_id else 0
 +
 +        if not limit:
@@ -267,7 +267,7 @@ index 2ceb789..5639691 100644
 +        resources['fpga_regions'] = all_regions
 +        resources['fpga_regions_used'] = used_regions
 diff --git a/conf/compute.py b/conf/compute.py
-index 8e9e64d..594061d 100644
+index 8e9e64d..1a2933a 100644
 --- a/conf/compute.py
 +++ b/conf/compute.py
 @@ -225,6 +225,13 @@ NOTE: This can be set per-compute, or if set to 0.0, the value
@@ -279,7 +279,7 @@ index 8e9e64d..594061d 100644
 +        help="Whether or not instances can access FPGA."),
 +    cfg.StrOpt('fpga_exec',
 +        default=None,
-+        help="Executable for getting status of the FPGA, programming""
++        help="Executable for getting status of the FPGA, programming"
 +             "and erasing."),
      cfg.FloatOpt('disk_allocation_ratio',
          default=0.0,
@@ -1281,18 +1281,9 @@ index 601a4f6..5067e06 100644
                          context, objects.ComputeNode(), cn)
                      for cn in fake_compute_nodes]
 diff --git a/tests/unit/compute/test_compute_mgr.py b/tests/unit/compute/test_compute_mgr.py
-index 709c98c..762155c 100644
+index 709c98c..ebe5857 100644
 --- a/tests/unit/compute/test_compute_mgr.py
 +++ b/tests/unit/compute/test_compute_mgr.py
-@@ -3295,7 +3295,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
-                 requested_networks=self.requested_networks,
-                 security_groups=self.security_groups,
-                 block_device_mapping=self.block_device_mapping, node=self.node,
--                limits=self.limits)
-+                limits=self.limits, request_spec={})
- 
-         self._assert_build_instance_hook_called(mock_hooks,
-                                                 build_results.ACTIVE)
 @@ -3370,7 +3370,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                  self.image, self.injected_files, self.admin_pass,
                  self.requested_networks, self.security_groups,
@@ -1320,15 +1311,6 @@ index 709c98c..762155c 100644
          mock_cleanup_network.assert_called_once_with(
              self.context, instance, self.requested_networks)
          mock_build_ins.assert_called_once_with(self.context,
-@@ -3590,7 +3590,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
-                 requested_networks=self.requested_networks,
-                 security_groups=self.security_groups,
-                 block_device_mapping=self.block_device_mapping, node=self.node,
--                limits=self.limits)
-+                limits=self.limits, request_spec={})
- 
-         self._assert_build_instance_hook_called(mock_hooks,
-                 build_results.FAILED)
 @@ -3648,7 +3648,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                  self.image, self.injected_files, self.admin_pass,
                  self.requested_networks, self.security_groups,
@@ -1754,3 +1736,22 @@ index 43ce9b5..4ad1420 100644
          host = host_manager.HostState("fakehost", "fakenode")
          host.update(compute=compute)
  
+diff --git a/virt/driver.py b/virt/driver.py
+index 1ca49a4..32028bd 100644
+--- a/virt/driver.py
++++ b/virt/driver.py
+@@ -1614,9 +1614,11 @@ def load_compute_driver(virtapi, compute_driver=None):
+ 
+     LOG.info(_LI("Loading compute driver '%s'"), compute_driver)
+     try:
+-        driver = importutils.import_object(
+-            'nova.virt.%s' % compute_driver,
+-            virtapi)
++        if "docker" in compute_driver:
++            driver = importutils.import_object(compute_driver, virtapi)
++        else:
++            driver = importutils.import_object(
++                'nova.virt.%s' % compute_driver, virtapi)
+         return utils.check_isinstance(driver, ComputeDriver)
+     except ImportError:
+         LOG.exception(_LE("Unable to load the virtualization driver"))
