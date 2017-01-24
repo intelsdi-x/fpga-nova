@@ -52,7 +52,7 @@ this:
    # whoami
    root
 
-Installation of OpenStack Liberty on Ubuntu 14.04
+Openstack installation
 -------------------------------------------------
 
 Hardware requirements
@@ -69,29 +69,34 @@ machines needed. The minimum requirements for each of them are:
 One of the node should have FPGA installed, however it is not necessary for
 demonstrating OpenStack part, there could be mock command used.
 
-If needed, virtual machines might be use as well.
+If needed, virtual machines might be used as well.
 
 Software assumption:
 
-* Only Ubuntu 14.04 is supported, with python-nova in version
-  ``2:12.0.3-0ubuntu1~cloud0``
-* Available command for burning/erasing/get status is required
+* Command line application for burning/erasing/getting status is required
   (`fpga-cli.py` is provided for getting the idea about expected
   interface)
+
+Supported OpenStack versions:
++++++++++++++++++++++++++++++
+* Liberty: Ubuntu 14.04
+* Mitaka: Ubuntu 14.04
+* Newton: Ubuntu 16.04, RedHat 7.2
 
 
 Ubuntu Installation and configuration
 +++++++++++++++++++++++++++++++++++++
 
-The recommended installation source is the `server version of Ubuntu`_. This
-demo was prepared using 14.04 LTS version. The installation is straightforward,
-although it might require providing some information (like proxy servers)
-depending on environment. The best way of installing the system is to keep it
-minimal. For what it's worth, it might be useful to install OpenSSH server on
-each node.
+Note that the following guide is an example based on Ubuntu operating system.
 
-As for configuration options, there should be checked several things, like
-below.
+The recommended installation source is the `server version of Ubuntu`_. This
+demo was prepared using either 14.04 LTS or 16.04 LTS version. The
+installation is straightforward, although it might require providing some
+information (like proxy servers) depending on environment. The best way of
+installing the system is to keep it minimal. For what it's worth, it might be
+useful to install OpenSSH server on each node.
+
+Several configuration options should be verified:
 
 #. ``/etc/hostname`` - for each node provide unique host name (for example
    "controller", "compute1", "compute2")
@@ -132,18 +137,6 @@ with the following assumptions:
 
 * `nova-docker`_ [1]_ should be installed
 
-Following components are taken as is from the installation instructions:
-
-* `Network configuration for controller`_
-* `Network configuration for compute nodes`_
-* `NTP`_
-* `OpenStack packages`_
-* `SQL server`_
-* `RabbitMQ server`_
-* `Keystone`_
-* `Glance`_
-* `Nova`_
-
 Docekr and nova-docker installation and configuration
 +++++++++++++++++++++++++++++++++++++++++++++++++++++
 
@@ -152,9 +145,13 @@ nodes, along with the and following changes:
 
    .. code:: shell-session
 
+      # # Depending on OpenStack version, use appropriate branch:
+      # # stable/liberty - for Liberty release
+      # # stable/mitaka - for Mitaka release
+      # # master - for Newton release
       # git clone https://github.com/openstack/nova-docker -b stable/liberty
       # cd nova-docker
-      # patch -Np1 -i "[/path/to/this/repository]/patches/nova_docker.patch"
+      # patch -Np1 -i "[/path/to/this/repository]/patches/nova_docker_[OpenStack version].patch"
       # pip install .
       # # this one is optional; useful if you want to perform simple test
       # docker pull busybox
@@ -182,6 +179,7 @@ Follow `docker installation guide`_, which basically are the following steps:
 
       # apt-key adv --keyserver hkp://p80.pool.sks-keyservers.net:80 \
         --recv-keys 58118E89F3A912897C070ADBF76221572C52609D
+      # # Use either trusty or xenial repository
       # echo 'deb https://apt.dockerproject.org/repo ubuntu-trusty main' >> \
         /etc/apt/sources.list
       # apt-get update
@@ -213,7 +211,7 @@ nodes):
 For confidence, there are scripts for automate the process of installation under
 ``build_scripts`` directory.
 
-Installation process for modifications
+Installation process of modifications
 --------------------------------------
 
 After having up and running OpenStack, it is time to install the modifications
@@ -236,7 +234,7 @@ and configure stack to be FPGA aware.
       # nova_ver=$(dpkg -l |grep -w python-nova | sed -e "s/ii\s\+python-nova\s\+2:\([0-9.]\+\).*/\1/g")
       # echo $nova_ver
       12.0.5
-      # patch -Np1 -i "[/path/to/this/repository]/patches/ubuntu_14.04-nova-${nova_ver}.patch"
+      # patch -Np1 -i "[/path/to/this/repository]/patches/ubuntu_[14.04 or 16.04]-nova-${nova_ver}.patch"
       patching file compute/resource_tracker.py
       patching file db/sqlalchemy/migrate_repo/versions/303_add_fpga_field.py
       patching file db/sqlalchemy/migrate_repo/versions/304_add_fpga_instance_field.py
@@ -278,8 +276,8 @@ and configure stack to be FPGA aware.
    wrap the real commands into script or executable with compatible interface.
    For the last case it will need modification of the code.
 
-#. There is a need for modify rootwrap configuration, for enabling command used
-   for interacting with the FPGA on compute node. Append following line for
+   There is a need for modifying rootwrap configuration, for enabling stub
+   command to be used by compute node. Append following line for
    ``/etc/nova/rootwrap.d/compute.filters`` and
    ``/etc/nova/rootwrap.d/network.filters``:
 
@@ -371,7 +369,7 @@ Technical details
 Integration with the OpenStack code base have, as described in the above
 instructions, assumptions:
 
-* Support for Docker containers only, thus nova-docker have to be used
+* Support for Docker containers only, thus nova-docker has to be used
 * Some kind of command line tool for programming, erasing and getting the
   status of FPGA with interface described below
 * On system level accelerator programmed on FPGA should expose any kind of
@@ -420,8 +418,7 @@ As for the OpenStack code base, nova components was changed as follows:
 * ``compute/manager`` - triggers methods from ``fpga`` module to program/erase
   FPGA
 
-Nova-docker driver (from liberty branch), was adapted to accept list of
-devices, file: ``novadocker/virt/docker/driver.py``.
+Nova-docker driver, was adapted to accept list of devices, file: ``novadocker/virt/docker/driver.py``.
 
 All actions regarding interaction with the FPGA going through the command line
 utility, which interface is described in next section.
@@ -451,7 +448,7 @@ Such utility should provide following interface:
    .. code:: shell-session
 
       # fpga-cli.py burn bad-image-id; echo $?
-      Error: cannot programm `bad-image-id' - no matching hardware found
+      Error: cannot program `bad-image-id' - no matching hardware found
       64
 
 #. ``erase``. Another argument is required, and it should be identifier
@@ -502,16 +499,7 @@ Current version of this work is 0.1, and is treated as alpha/PoC stage.
 
 .. _this repository: https://github.com/intelsdi-x/fpga-nova
 .. _server version of Ubuntu: http://www.ubuntu.com/download/server
-.. _OpenStack documentation: http://docs.openstack.org/liberty/install-guide-ubuntu/
-.. _Network configuration for controller: http://docs.openstack.org/liberty/install-guide-ubuntu/environment-networking-controller.html
-.. _Network configuration for compute nodes: http://docs.openstack.org/liberty/install-guide-ubuntu/environment-networking-compute.html
-.. _NTP: http://docs.openstack.org/liberty/install-guide-ubuntu/environment-ntp.html
-.. _OpenStack packages: http://docs.openstack.org/liberty/install-guide-ubuntu/environment-packages.html
-.. _SQL server: http://docs.openstack.org/liberty/install-guide-ubuntu/environment-sql-database.html
-.. _RabbitMQ server: http://docs.openstack.org/liberty/install-guide-ubuntu/environment-messaging.html
-.. _Keystone: http://docs.openstack.org/liberty/install-guide-ubuntu/keystone.html
-.. _Glance: http://docs.openstack.org/liberty/install-guide-ubuntu/glance.html
-.. _Nova: http://docs.openstack.org/liberty/install-guide-ubuntu/nova.html
+.. _OpenStack documentation: http://docs.openstack.org/
 .. _nova-docker: https://github.com/openstack/nova-docker
 .. _docker installation guide: https://docs.docker.com/engine/installation/linux/ubuntulinux/
 .. _IP-Core: https://en.wikipedia.org/wiki/Semiconductor_intellectual_property_core

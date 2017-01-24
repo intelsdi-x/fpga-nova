@@ -1,0 +1,25 @@
+#!/bin/bash
+set -x
+
+if [ ! -d fpga-nova ]; then
+    git clone FPGA-NOVA-REPO
+    if [ $? != 0 ]; then
+        echo Failure in getting fpga-nova repository
+        exit
+    fi
+fi
+
+git clone https://github.com/openstack/nova-docker
+
+cd nova-docker
+patch -Np1 -i ../fpga-nova/patches/nova_docker_newton.patch
+pip install .
+cd -
+
+echo "[DEFAULT]" > /etc/nova/nova-compute.conf
+echo "compute_driver=novadocker.virt.docker.DockerDriver" >> /etc/nova/nova-compute.conf
+echo "fpga_simulation_mode = False" >> /etc/nova/nova-compute.conf
+
+usermod -a -G docker nova
+
+systemctl restart openstack-nova-network openstack-nova-compute

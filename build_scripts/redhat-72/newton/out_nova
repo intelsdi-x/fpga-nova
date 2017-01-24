@@ -1,0 +1,10 @@
+#!/bin/bash
+set -x
+
+systemctl stop openstack-nova-api openstack-nova-scheduler openstack-nova-conductor
+
+echo 'DROP DATABASE nova;' | mysql -u root -proot
+echo 'DROP DATABASE nova_api;' | mysql -u root -proot
+
+yum remove -y openstack-nova-api openstack-nova-conductor \
+    openstack-nova-scheduler python-novaclient

@@ -1,0 +1,5 @@
+#!/bin/bash
+set -x
+
+systemctl stop openstack-nova-compute openstack-nova-network
+yum remove -y openstack-nova-compute openstack-nova-network

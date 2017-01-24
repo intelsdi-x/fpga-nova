@@ -1,0 +1,10 @@
+#!/bin/bash
+set -x
+
+systemctl stop httpd
+
+echo 'DROP DATABASE keystone;' | mysql -u root -proot
+yum remove -y openstack-keystone httpd mod_wsgi
+
+rm admin-openrc.sh
+rm demo-openrc.sh

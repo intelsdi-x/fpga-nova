@@ -1,0 +1,5 @@
+#!/bin/bash
+set -x
+
+yum remove -y docker-engine
+rm -f /etc/yum.repos.d/docker.repo

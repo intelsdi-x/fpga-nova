@@ -1,0 +1,7 @@
+#!/bin/bash
+set -x
+
+service glance-registry stop
+service glance-api stop
+echo 'DROP DATABASE glance;' | mysql -u root -proot
+apt-get -y --force-yes purge glance python-glanceclient

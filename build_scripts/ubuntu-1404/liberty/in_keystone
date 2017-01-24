@@ -1,0 +1,141 @@
+#!/bin/bash
+
+echo 'CREATE DATABASE keystone;' | mysql -u root -proot
+echo "GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'localhost' IDENTIFIED BY 'KEYSTONE_DBPASS';" |mysql -u root -proot
+echo "GRANT ALL PRIVILEGES ON keystone.* TO 'keystone'@'%' IDENTIFIED BY 'KEYSTONE_DBPASS';" |mysql -u root -proot
+echo "manual" > /etc/init/keystone.override
+
+apt-get -y --force-yes install keystone apache2 libapache2-mod-wsgi memcached python-memcache
+
+cat << EOF > /etc/keystone/keystone.conf
+[DEFAULT]
+admin_token = ADMIN_TOKEN
+log_dir = /var/log/keystone
+verbose = True
+
+[database]
+connection = mysql+pymysql://keystone:KEYSTONE_DBPASS@CONTROLLER_HOSTNAME/keystone
+
+[memcache]
+servers = localhost:11211
+
+[revoke]
+driver = sql
+
+[token]
+provider = uuid
+driver = memcache
+
+[extra_headers]
+Distribution = Ubuntu
+EOF
+
+echo ServerName CONTROLLER_HOSTNAME >> /etc/apache2/apache2.conf
+
+cat << EOF > /etc/apache2/sites-available/wsgi-keystone.conf
+Listen 5000
+Listen 35357
+
+<VirtualHost *:5000>
+    WSGIDaemonProcess keystone-public processes=5 threads=1 user=keystone group=keystone display-name=%{GROUP}
+    WSGIProcessGroup keystone-public
+    WSGIScriptAlias / /usr/bin/keystone-wsgi-public
+    WSGIApplicationGroup %{GLOBAL}
+    WSGIPassAuthorization On
+    <IfVersion >= 2.4>
+      ErrorLogFormat "%{cu}t %M"
+    </IfVersion>
+    ErrorLog /var/log/apache2/keystone.log
+    CustomLog /var/log/apache2/keystone_access.log combined
+
+    <Directory /usr/bin>
+        <IfVersion >= 2.4>
+            Require all granted
+        </IfVersion>
+        <IfVersion < 2.4>
+            Order allow,deny
+            Allow from all
+        </IfVersion>
+    </Directory>
+</VirtualHost>
+
+<VirtualHost *:35357>
+    WSGIDaemonProcess keystone-admin processes=5 threads=1 user=keystone group=keystone display-name=%{GROUP}
+    WSGIProcessGroup keystone-admin
+    WSGIScriptAlias / /usr/bin/keystone-wsgi-admin
+    WSGIApplicationGroup %{GLOBAL}
+    WSGIPassAuthorization On
+    <IfVersion >= 2.4>
+      ErrorLogFormat "%{cu}t %M"
+    </IfVersion>
+    ErrorLog /var/log/apache2/keystone.log
+    CustomLog /var/log/apache2/keystone_access.log combined
+
+    <Directory /usr/bin>
+        <IfVersion >= 2.4>
+            Require all granted
+        </IfVersion>
+        <IfVersion < 2.4>
+            Order allow,deny
+            Allow from all
+        </IfVersion>
+    </Directory>
+</VirtualHost>
+EOF
+ln -s /etc/apache2/sites-available/wsgi-keystone.conf \
+    /etc/apache2/sites-enabled
+service apache2 restart
+rm -f /var/lib/keystone/keystone.db
+# for some reason, keystone does rollback(?) migrations, or make them on the 
+# sqlite db. Let's do that again
+su -s /bin/sh -c "keystone-manage db_sync" keystone
+
+export OS_TOKEN=ADMIN_TOKEN
+export OS_URL=http://CONTROLLER_HOSTNAME:35357/v3
+export OS_IDENTITY_API_VERSION=3
+
+openstack service create \
+    --name keystone --description "OpenStack Identity" identity
+
+# endpointy:
+openstack endpoint create --region RegionOne \
+      identity public http://CONTROLLER_HOSTNAME:5000/v2.0
+openstack endpoint create --region RegionOne \
+      identity internal http://CONTROLLER_HOSTNAME:5000/v2.0
+openstack endpoint create --region RegionOne \
+      identity admin http://CONTROLLER_HOSTNAME:35357/v2.0
+
+# Create projects, users, and roles
+openstack project create --domain default --description "Admin Project" admin
+openstack user create --domain default --password admin admin
+openstack role create admin
+openstack role add --project admin --user admin admin
+openstack project create --domain default \
+    --description "Service Project" service
+openstack project create --domain default --description "Demo Project" demo
+openstack user create --domain default --password demo demo
+openstack role create user
+openstack role add --project demo --user demo user
+
+# create openrc scripts
+cat << EOF > admin-openrc.sh
+export OS_PROJECT_DOMAIN_ID=ADMIN__OS_PROJECT_DOMAIN_NAME
+export OS_USER_DOMAIN_ID=ADMIN__OS_USER_DOMAIN_NAME
+export OS_PROJECT_NAME=ADMIN__OS_PROJECT_NAME
+export OS_TENANT_NAME=ADMIN__OS_TENANT_NAME
+export OS_USERNAME=ADMIN__OS_USERNAME
+export OS_PASSWORD=ADMIN__OS_PASSWORD
+export OS_AUTH_URL=http://CONTROLLER_HOSTNAME:35357/v3
+export OS_IDENTITY_API_VERSION=ADMIN__OS_IDENTITY_API_VERSION
+EOF
+
+cat << EOF > demo-openrc.sh
+export OS_PROJECT_DOMAIN_ID=DEMO__OS_PROJECT_DOMAIN_NAME
+export OS_USER_DOMAIN_ID=DEMO__OS_USER_DOMAIN_NAME
+export OS_PROJECT_NAME=DEMO__OS_PROJECT_NAME
+export OS_TENANT_NAME=DEMO__OS_TENANT_NAME
+export OS_USERNAME=DEMO__OS_USERNAME
+export OS_PASSWORD=DEMO__OS_PASSWORD
+export OS_AUTH_URL=http://CONTROLLER_HOSTNAME:5000/v3
+export OS_IDENTITY_API_VERSION=DEMO__OS_IDENTITY_API_VERSION
+EOF

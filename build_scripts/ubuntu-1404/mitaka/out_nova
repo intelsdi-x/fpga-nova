@@ -1,0 +1,11 @@
+#!/bin/bash
+set -x
+
+service nova-api stop
+service nova-scheduler stop
+service nova-conductor stop
+
+echo 'DROP DATABASE nova;' | mysql -u root -proot
+echo 'DROP DATABASE nova_api;' | mysql -u root -proot
+
+apt-get -y --force-yes purge nova-api nova-conductor nova-scheduler python-novaclient

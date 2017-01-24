@@ -1,0 +1,9 @@
+#!/bin/bash
+set -x
+
+yum -y install chrony
+sed -i '/^server [0-9].rhel.*/d' /etc/chrony.conf
+echo 'server 172.28.168.170 offline minpoll 8' >> /etc/chrony.conf
+yum install -y https://rdoproject.org/repos/rdo-release.rpm
+yum upgrade -y
+yum install -y openstack-selinux

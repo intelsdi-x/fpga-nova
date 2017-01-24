@@ -1,0 +1,18 @@
+#!/bin/bash
+set -x
+
+if [ ! -d fpga-nova ]; then
+    git clone FPGA-NOVA-REPO
+    if [ $? != 0 ]; then
+        echo Failure in getting fpga-nova repository
+        exit
+    fi
+fi
+
+current=$(dpkg -l |grep -w python-nova | sed -e "s/ii\s\+python-nova\s\+2:\([0-9.]\+\).*/\1/g")
+[[ ! -e "fpga-nova/patches/ubuntu_16.04-nova-${current}.patch" ]] && echo "No patch for version ${current}!" && exit 1
+fpga_dir=$(pwd)
+cd /usr/lib/python2.7/dist-packages
+patch -Np1 -i "${fpga_dir}/fpga-nova/patches/ubuntu_16.04-nova-${current}.patch"
+cd -
+service nova-compute restart

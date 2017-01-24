@@ -1,0 +1,16 @@
+#!/bin/bash
+set -x
+
+. admin-openrc.sh
+
+sed -ie 's/container_formats = .*/container_formats = ami,ari,aki,bare,ovf,ova,docker,fpga/' /etc/glance/glance-api.conf
+restorecon -v /etc/glance/glance-api.conf
+systemctl restart openstack-glance-api openstack-glance-registry
+
+sleep 10
+
+echo "DEADCODE" > fpga_image
+glance image-create --id dd834aa4-f950-40e6-8c23-9dab7f3f0138 --file fpga_image --name fpga_image --disk-format raw --container-format fpga
+rm -f fpga_image
+nova flavor-create fpga.tiny 6 512 1 1
+nova flavor-key fpga.tiny set "hw:fpga_ip_id"="dd834aa4-f950-40e6-8c23-9dab7f3f0138"

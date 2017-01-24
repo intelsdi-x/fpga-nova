@@ -1,0 +1,5 @@
+#!/bin/bash
+set -x
+
+rm -f /usr/bin/fpga-cli
+rm -fr fpga-nova

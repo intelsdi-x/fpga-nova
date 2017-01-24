@@ -1,0 +1,5 @@
+#!/bin/bash
+set -x
+
+systemctl stop openstack-nova-compute
+rm -fr fpga-nova

@@ -1,16 +1,21 @@
-Build sctipts for deploying the demo on VMs
+Build scripts for deploying the demo on VMs
 ===========================================
 
-This directory contains helper scripts for deploying OpenStack Liberty with
+This directory contains helper scripts for deploying OpenStack with
 FPGA integration with ease on `VirtualBox`_ or real hardware, just for
 development and/or demo purposes.
+
+Supported OpenStack versions and distros
+++++++++++++++++++++++++++++++++++++++++
+- Liberty: `Ubuntu 14.04 server`_
+- Mitaka: `Ubuntu 14.04 server`_
+- Newton: `Ubuntu 16.04 server`_, `RHEL 7.2`_
 
 Requirements
 ++++++++++++
 
-Scripts were tested using VirtualBox machines, so the assumption ism that it
-will be used.
-
+* VirtualBox is used to set up the cloud. ``VBoxManage`` command line tool
+  should be installed.
 * Virtualized hardware:
 
   * 2 CPU cores
@@ -21,13 +26,12 @@ will be used.
     * 2nd is static internal network set to ``192.168.1.2``
     * 3rd is static host only adapter set to ``192.168.56.2`` for accessing
       from host, if using VirtualBox VMs.
-  * 10GB storage
+  * 15GB storage
 
-* Preconfigured `Ubuntu 14.04 server`_:
+* Preconfigured operating system:
 
-  * VM name: ``ubuntu-1404``
   * Typical installation with only ssh server enabled
-  * Main user: ``ubuntu``
+  * Main user: ``openstack``
   * Installed software (note, that most of them are for help with
     development/debugging):
 
@@ -43,7 +47,8 @@ will be used.
     * python-pip
     * tmux
     * mc
-
+  * RHEL operating system has to be registered with Red Hat
+    Subscription Management and attached to RHEL entitlements.
   * Configuration
 
     * Sudo:
@@ -52,78 +57,68 @@ will be used.
 
          %sudo   ALL=(ALL) NOPASSWD:ALL
 
-    * Network: ``/etc/network/interfaces``:
+    * Network:
 
-      .. code::
-
-         # The loopback network interface
-         auto lo
-         iface lo inet loopback
-
-         # The primary network interface
-         auto eth0
-         iface eth0 inet dhcp
-
-         # The primary network interface
-         auto eth1
-         iface eth1 inet static
-         address 192.168.1.2
-         netmask 255.255.255.0
-         broadcast 192.168.1.255
-
-         # The primary network interface
-         auto eth2
-         iface eth2 inet static
-         address 192.168.56.2
-         netmask 255.255.255.0
-         broadcast 192.168.56.255
-
-  * Upgrade the software:
-
-    .. code:: shell-session
-
-       # aptitude update && aptitude upgrade
+      * First network interface: DHCP
+      * Second network interface: static 192.168.1.2/24
+      * Third network interface: static 192.168.56.2/24
 
 * Host
 
-  * SSH key exchange from host might be nice
+  * SSH key exchange from host is required
   * The following line, should be placed in ``/etc/hosts``:
 
     .. code::
 
-       192.168.56.2 ubuntu
+       192.168.56.2 base_openstack_vm
 
-Any other needed software may be installed in front as well.
+Any other software may be installed in front as well.
 
 Build the cloud
 +++++++++++++++
 
-For setting up the cloud, there would be a configuration needed. For this very
-demo purpose, following yaml should be enough:
+For setting up the cloud, configuration file needs to be provided. The following
+yaml may be used as an example to set up Liberty on Ubuntu 14.04:
 
 .. code:: yaml
 
+   base_vm: ubuntu-1404
+   base_user: openstack
+   base_distribution: ubuntu
+   base_hostname: base_openstack_vm
+   openstack_version: liberty
    config: {}
    nodes:
        controller:
            ips: [192.168.56.3, 192.168.1.3]
            role: controller
            modules: [provision_conf, openstackclient_db_mq, keystone, glance,
-               nova, docker, docker_glance, fpga_files, fpga_db,
-               nova_scheduler_filter, flavor_and_image]
+               docker, docker_glance, nova, fpga_files, fpga_db,
+               nova_scheduler_filter, flavor_and_image, horizon]
        compute1:
            ips: [192.168.56.4, 192.168.1.4]
            role: compute
-           modules: [provision_conf, nova_compute, docker, nova_docker,
+           modules: [provision_conf, nova_compute, docker, nova_docker_patches,
                fpga_files, fpga_exec]
        compute2:
            ips: [192.168.56.5, 192.168.1.5]
            role: compute
-           modules: [provision_conf, nova_compute, docker, nova_docker,
+           modules: [provision_conf, nova_compute, docker, nova_docker_patches,
                fpga_files]
 
 Where:
 
+* base_vm is a name of VirtualBox VM that will be used as a base distro
+  for all OpenStack nodes
+* base_user - username of the ``base_vm`` VM
+* base_distribution - ``base_vm`` OS distribution. One of: ``ubuntu``,
+  ``redhat``. Needs to be specified because network configuration is done
+  differently depending on OS distribution
+* base_hostname - host name, on which ``base_vm`` record is placed in
+  ``/etc/hosts``. This host name will be used in early phase of provisioning
+  cloned VM with configuration.
+* openstack_version - one of: ``liberty``, ``mitaka``, ``newton`` (see
+  `Supported OpenStack versions and distros`_)
 * config is a dictionary with mapping for defaults for the entire cloud
   (currently they are values for the OS_* variables for OpenStack environment)
 * nodes defines a machines configuration to be generated (and VM cloned), where
@@ -143,7 +138,7 @@ VMs on the host:
 
    $ ./build_cloud.py cloud.yaml
 
-This will issue the clone form ``ubuntu-1404`` to VMs which names will
+This will issue the clone from ``base_vm`` to VMs which names will
 correspond to the host names. Note, that script which clones machines will
 refuse to clone if machine already exists.
 
@@ -166,12 +161,23 @@ This will produce main script (and directory with modules) for each node, which
 could be run on destination hosts. Scripts will be named as ``hostname.sh``, and
 directory as ``hostname_modules``.
 
+Other parameters that may be passed to ``build_cloud.py``:
+
+* ``--skip-hosts`` - do not clone machine, just generate install scripts
+* ``--remove`` - dispose existing VMs
+* ``--auto-install`` - automatically start VMs and run OpenStack installation
+* ``--ssh-key`` - path to private SSH key used to clone git repositories
+* ``-v`` - be verbose. Adding more "v" will increase verbosity
+* ``-q`` - be quiet. Adding more "q" will decrease verbosity
+
 Installing OpenStack
 ++++++++++++++++++++
 
-Next it is time for installing selected modules on freshly cloned images. Using
-the example from above, and assuming, that ``/etc/hosts`` is filled with newly
-created machines, they can be started:
+Follow the next steps only if ``--auto-install`` parameter was not specified
+in ``build_cloud.py``. Otherwise, Openstack installation on freshly cloned
+images needs to be triggered. Using the above example and assuming that
+``/etc/hosts`` is filled with newly created machines, they can be started
+as follows:
 
 .. code:: shell-session
 
@@ -179,18 +185,20 @@ created machines, they can be started:
    $ VBoxManage startvm compute1 --type headless
    $ VBoxManage startvm compute2 --type headless
 
-next connect to every node (`tmux`_ can be helpful for dividing terminal
+Next, connect to every node (`tmux`_ can be helpful for dividing terminal
 window, and synchronizing panes to enter command in all nodes at once), and do:
 
 .. code:: shell-session
 
-   $ ssh ubuntu@controller
+   $ ssh <vm_user>@controller
    $ sudo su -
    # ./controller.sh
 
 for compute1 and compute2 nodes the commands are similar. After a (rather long)
-while, there should be up and running setup!
+while, the setup should be up and running!
 
 .. _Ubuntu 14.04 server: http://releases.ubuntu.com/14.04/
+.. _Ubuntu 16.04 server: http://releases.ubuntu.com/16.04/
+.. _RHEL 7.2: https://access.redhat.com/downloads/content/69/ver=/rhel---7/7.2/x86_64/product-software
 .. _VirtualBox: https://www.virtualbox.org/
 .. _tmux: https://tmux.github.io/

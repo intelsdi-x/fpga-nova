@@ -1,0 +1,25 @@
+#!/bin/bash
+set -x
+
+apt-get -y --force-yes install python-openstackclient
+
+# assuming password 'root'
+sudo debconf-set-selections <<< 'mariadb-server-10.0 mysql-server/root_password password root'
+sudo debconf-set-selections <<< 'mariadb-server-10.0 mysql-server/root_password_again password root'
+apt-get -y --force-yes install mariadb-server python-pymysql
+echo '[mysqld]' > /etc/mysql/conf.d/mysqld_openstack.cnf
+echo 'bind-address = AAA.BBB.CCC.DDD' >> /etc/mysql/conf.d/mysqld_openstack.cnf
+echo "default-storage-engine = innodb" >> /etc/mysql/conf.d/mysqld_openstack.cnf
+echo "innodb_file_per_table" >> /etc/mysql/conf.d/mysqld_openstack.cnf
+echo "collation-server = utf8_general_ci" >> /etc/mysql/conf.d/mysqld_openstack.cnf
+echo "init-connect = 'SET NAMES utf8'" >> /etc/mysql/conf.d/mysqld_openstack.cnf
+echo "character-set-server = utf8" >> /etc/mysql/conf.d/mysqld_openstack.cnf
+service mysql restart
+
+echo 'rabbitmq - nofile 65536' >> /etc/security/limits.conf
+ulimit -H -n 65536
+ulimit -S -n 65536
+
+apt-get -y --force-yes install rabbitmq-server
+rabbitmqctl add_user openstack RABBIT_PASS
+rabbitmqctl set_permissions openstack ".*" ".*" ".*"

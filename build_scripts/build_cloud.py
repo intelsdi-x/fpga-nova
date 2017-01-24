@@ -7,16 +7,31 @@ See README.rst for more details.
 """
 import argparse
 import errno
+import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
-import re
+import threading
 
 import yaml
 
 
-PATH = os.path.join(os.path.dirname(__file__), "modules")
+def setup_logger(args):
+    """Setup logger format and level"""
+    level = logging.WARNING
+    if args.quiet:
+        level = logging.ERROR
+        if args.quiet > 1:
+            level = logging.CRITICAL
+    if args.verbose:
+        level = logging.INFO
+        if args.verbose > 1:
+            level = logging.DEBUG
+    logging.basicConfig(level=level,
+                        format="%(asctime)s %(levelname)s: %(message)s")
+
 
 class Build(object):
     """Build the configuration scripts and optionally copy it to cloned VMs"""
@@ -26,19 +41,55 @@ class Build(object):
         self._clone = not args.dont_clone
         self._remove_vms = args.remove
         self._skip_hosts = args.skip_hosts
+        self._auto_install = args.auto_install
+        self.ssh_key = args.ssh_key
         self.config = config['config']
         self.context = {'controller': [], 'compute': []}
-        self.hosts = config['nodes']
+        self.hosts = config.get('nodes', {})
+        self.openstack_version = config.get('openstack_version', '')
+        self.base_vm = config.get('base_vm', '')
+        self.base_user = config.get('base_user')
+        self.base_distribution = config.get('base_distribution')
+        self.base_hostname = config.get('base_hostname')
+        self.modules_path = os.path.join(os.path.dirname(__file__),
+                                         self.base_vm,
+                                         self.openstack_version)
+        if self.ssh_key:
+            self.fpga_nova_repo = 'git@github.com:intelsdi-x/' \
+                                  'fpga-nova.git'
+        else:
+            self.fpga_nova_repo = 'https://github.com/intelsdi-x/' \
+                                  'fpga-nova.git'
 
         for hostname, data in self.hosts.items():
             self.context[data['role']].append(hostname)
 
     def build(self):
         """Build conf/clone vm"""
+        self.validate_cloudconf()
         self.create_configs()
         self.create_cleanup()
         if self._clone:
             self.clone_vms()
+        if self._auto_install:
+            self.auto_install()
+
+    def validate_cloudconf(self):
+        """Make sure the specified cloud config file contains valid data"""
+
+        if not os.path.isdir(self.modules_path):
+            logging.info("Building OpenStack '%s' on '%s' is not supported."
+                         " Exiting.", self.openstack_version, self.base_vm)
+            sys.exit(1)
+
+        required_vars = [self.openstack_version, self.base_vm, self.base_user,
+                         self.base_distribution, self.base_hostname]
+        for var in required_vars:
+            if not var:
+                logging.info("Cloud config file does not contain necessary "
+                             "data. Fill in the config and re-run the "
+                             "script. Exiting.")
+                sys.exit(1)
 
     def _check_vms_existence(self, command="vms"):
         """Return list of existing machines, that match hosts in self.hosts"""
@@ -59,28 +110,32 @@ class Build(object):
 
     def _remove_vm(self, host):
         """Remove virtual machine"""
-        print("removing vm `%s'" % host)
-        subprocess.check_call(['VBoxManage', 'unregistervm', host])
-        subprocess.check_call(['rm', '-fr',
-                               os.path.join(os.path.expanduser('~/'),
-                                            '.config', 'VirtualBox', host)])
+        logging.info("Removing vm `%s'.", host)
+        cmd = ['VBoxManage', 'unregistervm', host]
+        logging.debug("Executing: `%s'.", cmd)
+        subprocess.check_call(cmd)
+        cmd = ['rm', '-fr', os.path.join(os.path.expanduser('~/'), '.config',
+                                         'VirtualBox', host)]
+        logging.debug("Executing: `%s'.", cmd)
+        subprocess.check_call(cmd)
 
     def _poweroff_vm(self, host):
         """Turn off virtual machine"""
-        print("power off vm `%s'" % host)
-        subprocess.check_call(['VBoxManage', 'controlvm', host, 'poweroff'])
+        logging.info("Power off vm `%s'.", host)
+        cmd = ['VBoxManage', 'controlvm', host, 'poweroff']
+        logging.debug("Executing: `%s'.", cmd)
+        subprocess.check_call(cmd)
 
     def remove_vms(self):
         """Remove vms"""
         hosts = self._check_vms_existence()
 
         if hosts and not self._remove_vms:
-            print ("ERROR: there is at least one VM which exists. Remove "
-                   "it manually, or use --remove switch for wiping out all "
-                   "existing machines before cloning.")
-            print("\nConflicting VMs:")
-            for host in sorted(hosts):
-                print("- %s" % host)
+            logging.error("There is at least one VM which exists. Remove it "
+                          "manually, or use --remove switch for wiping out "
+                          "all existing machines before cloning."
+                          "\nConflicting VMs:\n%s",
+                          "\n".join(["- " + h for h in sorted(hosts)]))
             return False
 
         running_hosts = self._check_vms_existence('runningvms')
@@ -100,6 +155,9 @@ class Build(object):
                                 self.context['controller'][0])
         if 'AAA.BBB.CCC.DDD' in line:
             line = line.replace('AAA.BBB.CCC.DDD', data['ips'][0])
+        if 'FPGA-NOVA-REPO' in line:
+            line = line.replace('FPGA-NOVA-REPO', self.fpga_nova_repo)
+
         for key, val in self.config.items():
             if key in line:
                 line = line.replace(key, str(val))
@@ -117,7 +175,8 @@ class Build(object):
             for module in reversed(data['modules']):
                 mod = []
                 modpath = os.path.join(modules_out, "out_" + module)
-                with open(os.path.join(PATH, "out_" + module)) as fobj:
+                with open(os.path.join(self.modules_path,
+                                       "out_" + module)) as fobj:
                     for line in fobj:
                         mod.append(self.remap(line, data))
                 mod.append("")
@@ -125,6 +184,7 @@ class Build(object):
                 with open(modpath, "w") as fobj:
                     fobj.write('\n'.join(mod))
 
+                modpath = os.path.join("/root", modpath)
                 output.append("bash " + modpath)
             output.append("")
 
@@ -137,10 +197,20 @@ class Build(object):
             return
 
         for hostname, data in self.hosts.items():
+            env = os.environ.copy()
+            env.update({'VMNAME': self.base_vm,
+                        'VMUSER': self.base_user,
+                        'BASE_HOSTNAME': self.base_hostname,
+                        'NAME': hostname,
+                        'LAST_OCTET': data['ips'][0].split(".")[-1],
+                        'DISTRO': self.base_distribution})
+            if self.ssh_key:
+                env['SSH_KEY'] = self.ssh_key
+
+            cmd = ['./create_vm_clone.sh']
+            logging.debug("Executing: %s", " ".join(cmd))
             try:
-                subprocess.check_call(['./create_ubuntu_vm_clone.sh',
-                                       hostname,
-                                       data['ips'][0].split(".")[-1]])
+                subprocess.check_call(cmd, env=env)
             except subprocess.CalledProcessError as err:
                 sys.exit(err.returncode)
 
@@ -148,8 +218,9 @@ class Build(object):
         """Create configurations, and optionally clone and provision VMs"""
 
         if self._skip_hosts:
-            print('Warning: You have to add appropriate entries to your '
-                  '/etc/hosts, otherwise your cloud may not work properly.')
+            logging.warning('Warning: You have to add appropriate entries to '
+                            'your /etc/hosts, otherwise your cloud may not '
+                            'work properly.')
 
         for hostname, data in self.hosts.items():
             modules_out = hostname + "_modules"
@@ -179,18 +250,45 @@ class Build(object):
             for module in data['modules']:
                 mod = []
                 modpath = os.path.join(modules_out, "in_" + module)
-                with open(os.path.join(PATH, "in_" + module)) as fobj:
+                with open(os.path.join(self.modules_path,
+                                       "in_" + module)) as fobj:
                     for line in fobj:
                         mod.append(self.remap(line, data))
                 mod.append("")
                 with open(modpath, "w") as fobj:
                     fobj.write('\n'.join(mod))
 
+                modpath = os.path.join("/root", modpath)
                 output.append("bash " + modpath)
             output.append("")
 
             with open(hostname + ".sh", "w") as fobj:
                 fobj.write("\n".join(output))
+
+    def auto_install(self):
+        """Triggers Openstack intallation on all nodes specified in cloud
+        config file
+        """
+        for hostname, data in self.hosts.items():
+            public_ip = data['ips'][1]
+            t = threading.Thread(target=self.install_thread,
+                                 args=(hostname, public_ip))
+            t.start()
+
+    def install_thread(self, hostname, public_ip):
+        """Thread method that is responsible for Openstack installation
+        on a single VM
+        """
+        logging.info("Openstack installation on host %s has started (see "
+                     "%s.log)", hostname, hostname)
+        env = os.environ.copy()
+        env.update({'HOSTNAME': hostname,
+                    'IP_ADDRESS': public_ip,
+                    'VMUSER': self.base_user})
+        logging.debug("Executing in thread: " + './boot_vm_and_install.sh')
+        subprocess.check_call(['./boot_vm_and_install.sh'], env=env)
+        logging.info("Openstack installation on host %s has finished.",
+                     hostname)
 
 
 def main():
@@ -203,13 +301,24 @@ def main():
                         help='Skip appending hosts to /etc/hosts')
     parser.add_argument('--remove', '-r', action='store_true',
                         help='Dispose existing VMs')
+    parser.add_argument('--auto-install', '-a', action='store_true',
+                        help='Automatically start VMs and run Openstack '
+                             'installation')
+    parser.add_argument('--ssh-key', '-k', help='Path to private SSH key used'
+                                                ' to clone git repositories')
     parser.add_argument('cloudconf',
                         help='Yaml file with the cloud configuration')
+    parser.add_argument('-v', '--verbose', help='Be verbose. Adding more "v" '
+                        'will increase verbosity', action="count",
+                        default=None)
+    parser.add_argument('-q', '--quiet', help='Be quiet. Adding more "q" will'
+                        ' decrease verbosity', action="count", default=None)
     parsed_args = parser.parse_args()
 
     with open(parsed_args.cloudconf) as fobj:
         conf = yaml.load(fobj)
 
+    setup_logger(parsed_args)
     Build(parsed_args, conf).build()
 
 

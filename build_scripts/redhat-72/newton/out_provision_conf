@@ -1,0 +1,7 @@
+#!/bin/bash
+set -x
+
+yum remove -y openstack-selinux chrony python-openstackclient
+
+rpm -qa | grep rdo | xargs rpm -e
+yum update -y

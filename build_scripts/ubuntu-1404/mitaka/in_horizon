@@ -1,0 +1,26 @@
+#!/bin/bash
+set -x
+
+apt-get -y --force-yes install nova-consoleauth nova-novncproxy nova-cert \
+    openstack-dashboard
+
+sed -i 's/OPENSTACK_HOST = "127.0.0.1"/OPENSTACK_HOST = "CONTROLLER_HOSTNAME"/g' /etc/openstack-dashboard/local_settings.py
+sed -i "s/'enable_router': True/'enable_router': False/g" /etc/openstack-dashboard/local_settings.py
+sed -i "s/'enable_quotas': True/'enable_quotas': False/g" /etc/openstack-dashboard/local_settings.py
+sed -i "s/'enable_ipv6': True/'enable_ipv6': False/g" /etc/openstack-dashboard/local_settings.py
+sed -i "s/'enable_lb': True/'enable_lb': False/g" /etc/openstack-dashboard/local_settings.py
+sed -i "s/'enable_firewall': True/'enable_firewall': False/g" /etc/openstack-dashboard/local_settings.py
+sed -i "s/'enable_vpn': True/'enable_vpn': False/g" /etc/openstack-dashboard/local_settings.py
+sed -i "s/''enable_fip_topology_check'': True/''enable_fip_topology_check'': False/g" /etc/openstack-dashboard/local_settings.py
+sed -i "s/v2.0/v3/g" /etc/openstack-dashboard/local_settings.py
+sed -i '4iWSGIApplicationGroup %{GLOBAL}' /etc/apache2/conf-available/openstack-dashboard.conf
+
+echo 'OPENSTACK_API_VERSIONS = {"identity": 3, "volume": 2,"compute": 2}' >> /etc/openstack-dashboard/local_settings.py
+
+# Remove Ubuntu branded theme
+apt-get -y --force-yes purge openstack-dashboard-ubuntu-theme
+
+service nova-cert restart
+service nova-consoleauth restart
+service nova-novncproxy restart
+service apache2 reload

@@ -1,0 +1,5 @@
+#!/bin/bash
+set -x
+
+systemctl stop httpd.service
+yum remove -y openstack-dashboard

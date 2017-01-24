@@ -1,0 +1,47 @@
+#!/bin/bash
+set -x
+
+yum install -y python-openstackclient
+
+# assuming password 'root'
+# sudo debconf-set-selections <<< 'mariadb-server-10.0 mysql-server/root_password password root'
+# sudo debconf-set-selections <<< 'mariadb-server-10.0 mysql-server/root_password_again password root'
+
+yum install -y mariadb mariadb-server python2-PyMySQL
+
+echo '[mysqld]' > /etc/my.cnf.d/openstack.cnf
+echo 'bind-address = AAA.BBB.CCC.DDD' >> /etc/my.cnf.d/openstack.cnf
+echo "default-storage-engine = innodb" >> /etc/my.cnf.d/openstack.cnf
+echo "innodb_file_per_table" >> /etc/my.cnf.d/openstack.cnf
+echo "collation-server = utf8_general_ci" >> /etc/my.cnf.d/openstack.cnf
+echo "init-connect = 'SET NAMES utf8'" >> /etc/my.cnf.d/openstack.cnf
+echo "character-set-server = utf8" >> /etc/my.cnf.d/openstack.cnf
+
+systemctl enable mariadb.service
+systemctl start mariadb.service
+
+# This is to avoid prompting for password
+mysql_secure_installation <<EOF
+
+y
+root
+root
+y
+y
+y
+y
+EOF
+
+echo 'rabbitmq - nofile 65536' >> /etc/security/limits.conf
+ulimit -H -n 65536
+ulimit -S -n 65536
+
+yum install -y rabbitmq-server
+systemctl enable rabbitmq-server.service
+systemctl start rabbitmq-server.service
+
+rabbitmqctl add_user openstack RABBIT_PASS
+rabbitmqctl set_permissions openstack ".*" ".*" ".*"
+
+iptables -A IN_public_allow -p tcp -m tcp \
+    --dport 5672 -m conntrack --ctstate NEW -j ACCEPT

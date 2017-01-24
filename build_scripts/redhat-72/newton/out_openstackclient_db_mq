@@ -1,0 +1,12 @@
+#!/bin/bash
+set -x
+
+systemctl stop mariadb
+systemctl stop rabbitmq-server
+sed -i '/rabbitmq - nofile 65536/d' /etc/security/limits.conf
+
+yum remove -y python-openstackclient mariadb mariadb-server \
+    python2-PyMySQL mariadb-common mariadb-config mariadb-errmsg \
+    mariadb-lib rabbitmq-server
+
+rm -rf /var/lib/mysql

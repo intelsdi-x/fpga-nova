@@ -1,0 +1,12 @@
+#!/bin/bash
+set -x
+
+service apache2 stop
+service keystone stop
+
+echo 'DROP DATABASE keystone;' | mysql -u root -proot
+
+apt-get -y --force-yes purge keystone apache2 libapache2-mod-wsgi
+
+rm admin-openrc.sh
+rm demo-openrc.sh

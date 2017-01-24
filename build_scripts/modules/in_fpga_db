@@ -1,4 +1,0 @@
-#!/bin/bash
-
-. admin-openrc.sh
-nova-manage db sync

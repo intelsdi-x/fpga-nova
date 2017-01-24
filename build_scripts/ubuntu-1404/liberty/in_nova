@@ -1,0 +1,69 @@
+#!/bin/bash
+
+echo 'CREATE DATABASE nova;' | mysql -u root -proot
+echo "GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'localhost' IDENTIFIED BY 'NOVA_DBPASS';" |mysql -u root -proot
+echo "GRANT ALL PRIVILEGES ON nova.* TO 'nova'@'%' IDENTIFIED BY 'NOVA_DBPASS';" |mysql -u root -proot
+
+. admin-openrc.sh
+
+openstack user create --domain default --password NOVA_PASS nova
+openstack role add --project service --user nova admin
+openstack service create --name nova --description "OpenStack Compute" compute
+
+openstack endpoint create --region RegionOne \
+    compute public http://CONTROLLER_HOSTNAME:8774/v2/%\(tenant_id\)s
+openstack endpoint create --region RegionOne \
+    compute internal http://CONTROLLER_HOSTNAME:8774/v2/%\(tenant_id\)s
+openstack endpoint create --region RegionOne \
+    compute admin http://CONTROLLER_HOSTNAME:8774/v2/%\(tenant_id\)s
+
+apt-get -y --force-yes install nova-api nova-conductor nova-scheduler python-novaclient
+
+cat << EOF > /etc/nova/nova.conf
+[DEFAULT]
+dhcpbridge_flagfile=/etc/nova/nova.conf
+dhcpbridge=/usr/bin/nova-dhcpbridge
+logdir=/var/log/nova
+state_path=/var/lib/nova
+lock_path=/var/lock/nova
+force_dhcp_release=True
+libvirt_use_virtio_for_bridges=True
+verbose=True
+ec2_private_dns_show_ip=True
+api_paste_config=/etc/nova/api-paste.ini
+enabled_apis=osapi_compute,metadata
+
+auth_strategy = keystone
+my_ip = AAA.BBB.CCC.DDD
+rpc_backend = rabbit
+verbose = True
+
+network_api_class = nova.network.api.API
+security_group_api = nova
+
+[database]
+connection = mysql+pymysql://nova:NOVA_DBPASS@CONTROLLER_HOSTNAME/nova
+
+[oslo_messaging_rabbit]
+rabbit_host = CONTROLLER_HOSTNAME
+rabbit_userid = openstack
+rabbit_password = RABBIT_PASS
+
+[keystone_authtoken]
+auth_uri = http://CONTROLLER_HOSTNAME:5000
+auth_url = http://CONTROLLER_HOSTNAME:35357
+auth_plugin = password
+project_domain_id = default
+user_domain_id = default
+project_name = service
+username = nova
+password = NOVA_PASS
+
+[oslo_concurrency]
+lock_path = /var/lib/nova/tmp
+
+[glance]
+host = CONTROLLER_HOSTNAME
+EOF
+
+rm -f /var/lib/nova/nova.sqlite

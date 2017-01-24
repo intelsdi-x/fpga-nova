@@ -1,0 +1,6 @@
+#!/bin/bash
+set -x
+
+systemctl stop openstack-nova-compute
+rm -fr nova-docker
+pip uninstall nova-docker -y
