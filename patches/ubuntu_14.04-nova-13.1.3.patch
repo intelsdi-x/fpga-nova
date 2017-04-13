@@ -1,8 +1,8 @@
 diff --git a/nova/compute/claims.py b/nova/compute/claims.py
-index 1332e1f..c7726e6 100644
+index e0177fe..86ad03a 100644
 --- a/nova/compute/claims.py
 +++ b/nova/compute/claims.py
-@@ -75,13 +75,14 @@ class Claim(NopClaim):
+@@ -76,13 +76,14 @@ class Claim(NopClaim):
      """
  
      def __init__(self, context, instance, tracker, resources, pci_requests,
@@ -17,8 +17,8 @@ index 1332e1f..c7726e6 100644
 +        self._fpga_ip_id = fpga_ip_id
  
          if not overhead:
-             overhead = {'memory_mb': 0,
-@@ -142,6 +143,7 @@ class Claim(NopClaim):
+             overhead = {'memory_mb': 0}
+@@ -140,6 +141,7 @@ class Claim(NopClaim):
          disk_gb_limit = limits.get('disk_gb')
          vcpus_limit = limits.get('vcpu')
          numa_topology_limit = limits.get('numa_topology')
@@ -26,23 +26,23 @@ index 1332e1f..c7726e6 100644
  
          LOG.info(_LI("Attempting claim: memory %(memory_mb)d MB, "
                       "disk %(disk_gb)d GB, vcpus %(vcpus)d CPU"),
-@@ -152,7 +154,8 @@ class Claim(NopClaim):
+@@ -150,7 +152,8 @@ class Claim(NopClaim):
                     self._test_disk(resources, disk_gb_limit),
                     self._test_vcpus(resources, vcpus_limit),
                     self._test_numa_topology(resources, numa_topology_limit),
 -                   self._test_pci()]
 +                   self._test_pci(),
 +                   self._test_fpga(resources, fpga_regions_limit)]
+         reasons = reasons + self._test_ext_resources(limits)
          reasons = [r for r in reasons if r is not None]
          if len(reasons) > 0:
-             raise exception.ComputeResourcesUnavailable(reason=
-@@ -194,6 +197,30 @@ class Claim(NopClaim):
+@@ -193,6 +196,26 @@ class Claim(NopClaim):
              if not stats.support_requests(pci_requests.requests):
                  return _('Claim pci failed.')
  
 +    def _test_fpga(self, resources, limit):
-+        total = resources.fpga_regions
-+        used = resources.fpga_regions_used
++        total = resources.get('fpga_regions', 0)
++        used = resources.get('fpga_regions_used', 0)
 +        requested = 1 if self._fpga_ip_id else 0
 +
 +        if not limit:
@@ -60,14 +60,10 @@ index 1332e1f..c7726e6 100644
 +        LOG.info(_LI('Total FPGA regions: %(total)d, used: %(used)d '),
 +                 {'total': total, 'used': used}, instance=self.instance)
 +
-+    def _test_ext_resources(self, limits):
-+        return self.tracker.ext_resources_handler.test_resources(
-+            self.instance, limits)
-+
-     def _test_numa_topology(self, resources, limit):
-         host_topology = (resources.numa_topology
-                          if 'numa_topology' in resources else None)
-@@ -260,7 +287,8 @@ class MoveClaim(Claim):
+     def _test_ext_resources(self, limits):
+         return self.tracker.ext_resources_handler.test_resources(
+             self.instance, limits)
+@@ -264,7 +287,8 @@ class MoveClaim(Claim):
      Move can be either a migrate/resize, live-migrate or an evacuate operation.
      """
      def __init__(self, context, instance, instance_type, image_meta, tracker,
@@ -77,7 +73,7 @@ index 1332e1f..c7726e6 100644
          self.context = context
          self.instance_type = instance_type
          if isinstance(image_meta, dict):
-@@ -268,7 +296,8 @@ class MoveClaim(Claim):
+@@ -272,7 +296,8 @@ class MoveClaim(Claim):
          self.image_meta = image_meta
          super(MoveClaim, self).__init__(context, instance, tracker,
                                          resources, pci_requests,
@@ -88,18 +84,18 @@ index 1332e1f..c7726e6 100644
  
      @property
 diff --git a/nova/compute/manager.py b/nova/compute/manager.py
-index e8a13ed..a6d33df 100644
+index 99d9d4f..2088674 100644
 --- a/nova/compute/manager.py
 +++ b/nova/compute/manager.py
-@@ -71,6 +71,7 @@ from nova import consoleauth
+@@ -70,6 +70,7 @@ import nova.conf
+ from nova import consoleauth
  import nova.context
  from nova import exception
- from nova import exception_wrapper
 +from nova import fpga
  from nova import hooks
  from nova.i18n import _
  from nova.i18n import _LE
-@@ -1776,7 +1777,7 @@ class ComputeManager(manager.Manager):
+@@ -1923,7 +1924,7 @@ class ComputeManager(manager.Manager):
                  self._build_and_run_instance(context, instance, image,
                          decoded_files, admin_password, requested_networks,
                          security_groups, block_device_mapping, node, limits,
@@ -108,7 +104,7 @@ index e8a13ed..a6d33df 100644
              LOG.info(_LI('Took %0.2f seconds to build instance.'),
                       timer.elapsed(), instance=instance)
              return build_results.ACTIVE
-@@ -1882,7 +1883,8 @@ class ComputeManager(manager.Manager):
+@@ -2029,14 +2030,18 @@ class ComputeManager(manager.Manager):
  
      def _build_and_run_instance(self, context, instance, image, injected_files,
              admin_password, requested_networks, security_groups,
@@ -118,8 +114,7 @@ index e8a13ed..a6d33df 100644
  
          image_name = image.get('name')
          self._notify_about_instance_usage(context, instance, 'create.start',
-@@ -1892,7 +1894,10 @@ class ComputeManager(manager.Manager):
- 
+                 extra_usage_info={'image_name': image_name})
          try:
              rt = self._get_resource_tracker(node)
 -            with rt.instance_claim(context, instance, limits):
@@ -130,7 +125,7 @@ index e8a13ed..a6d33df 100644
                  # NOTE(russellb) It's important that this validation be done
                  # *after* the resource tracker instance claim, as that is where
                  # the host is set on the instance.
-@@ -2337,6 +2342,11 @@ class ComputeManager(manager.Manager):
+@@ -2471,6 +2476,11 @@ class ComputeManager(manager.Manager):
          except Exception:
              with excutils.save_and_reraise_exception():
                  quotas.rollback()
@@ -143,39 +138,62 @@ index e8a13ed..a6d33df 100644
          self._complete_deletion(context,
                                  instance,
 diff --git a/nova/compute/resource_tracker.py b/nova/compute/resource_tracker.py
-index 4436f71..31a27d2 100644
+index ebf16ad..513cde9 100644
 --- a/nova/compute/resource_tracker.py
 +++ b/nova/compute/resource_tracker.py
-@@ -19,7 +19,9 @@ scheduler with useful information about availability through the ComputeNode
- model.
+@@ -20,6 +20,7 @@ model.
  """
  import copy
-+import six
  
 +from oslo_concurrency import processutils
+ from oslo_config import cfg
  from oslo_log import log as logging
  from oslo_serialization import jsonutils
- from oslo_utils import importutils
-@@ -30,6 +32,7 @@ from nova.compute import task_states
+@@ -31,6 +32,7 @@ from nova.compute import resources as ext_resources
+ from nova.compute import task_states
  from nova.compute import vm_states
- import nova.conf
  from nova import exception
 +from nova import fpga
- from nova.i18n import _, _LI, _LW
+ from nova.i18n import _, _LE, _LI, _LW
  from nova import objects
  from nova.objects import base as obj_base
-@@ -99,7 +102,8 @@ class ResourceTracker(object):
+@@ -41,6 +43,7 @@ from nova.scheduler import client as scheduler_client
+ from nova import utils
+ from nova.virt import hardware
+ 
++
+ resource_tracker_opts = [
+     cfg.IntOpt('reserved_host_disk_mb', default=0,
+                help='Amount of disk in MB to reserve for the host'),
+@@ -62,8 +65,16 @@ resource_tracker_opts = [
+                      'openstack-dev mailing list. There is no future planned '
+                      'support for the tracking of custom resources.',
+                 deprecated_for_removal=True),
++    cfg.BoolOpt('fpga_access',
++                default=False,
++                help="Whether or not instances can access FPGA."),
++    cfg.StrOpt('fpga_exec',
++               default=None,
++               help="Executable for getting status of the FPGA, programming"
++               "and erasing."),
+ ]
+ 
++
+ allocation_ratio_opts = [
+     cfg.FloatOpt('cpu_allocation_ratio',
+         default=0.0,
+@@ -156,7 +167,8 @@ class ResourceTracker(object):
          self.disk_allocation_ratio = CONF.disk_allocation_ratio
  
      @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
--    def instance_claim(self, context, instance, limits=None):
-+    def instance_claim(self, context, instance, limits=None,
+-    def instance_claim(self, context, instance_ref, limits=None):
++    def instance_claim(self, context, instance_ref, limits=None,
 +                       request_spec=None):
          """Indicate that some resources are needed for an upcoming compute
          instance build operation.
  
-@@ -111,6 +115,8 @@ class ResourceTracker(object):
-         :type instance: nova.objects.instance.Instance object
+@@ -168,6 +180,8 @@ class ResourceTracker(object):
+         :type instance_ref: nova.objects.instance.Instance object
          :param limits: Dict of oversubscription limits for memory, disk,
                         and CPUs.
 +        :param request_spec: dict of parameters describing how instance
@@ -183,9 +201,9 @@ index 4436f71..31a27d2 100644
          :returns: A Claim ticket representing the reserved resources.  It can
                    be used to revert the resource usage if an error occurs
                    during the instance build.
-@@ -141,10 +147,17 @@ class ResourceTracker(object):
-                   "GB", {'flavor': instance.flavor.root_gb,
-                          'overhead': overhead.get('disk_gb', 0)})
+@@ -195,10 +209,17 @@ class ResourceTracker(object):
+                   "MB", {'flavor': instance_ref.memory_mb,
+                           'overhead': overhead['memory_mb']})
  
 +        fpga_ip_id = fpga.get_ip_image_id(request_spec)
 +        if fpga_ip_id:
@@ -194,30 +212,28 @@ index 4436f71..31a27d2 100644
 +            limits['fpga_regions'] = self.compute_node.fpga_regions
 +
          pci_requests = objects.InstancePCIRequests.get_by_instance_uuid(
-             context, instance.uuid)
-         claim = claims.Claim(context, instance, self, self.compute_node,
+             context, instance_ref.uuid)
+         claim = claims.Claim(context, instance_ref, self, self.compute_node,
 -                             pci_requests, overhead=overhead, limits=limits)
 +                             pci_requests, overhead=overhead, limits=limits,
 +                             fpga_ip_id=fpga_ip_id)
  
-         # self._set_instance_host_and_node() will save instance to the DB
-         # so set instance.numa_topology first.  We need to make sure
-@@ -543,7 +556,13 @@ class ResourceTracker(object):
+         # self._set_instance_host_and_node() will save instance_ref to the DB
+         # so set instance_ref['numa_topology'] first.  We need to make sure
+@@ -544,6 +565,12 @@ class ResourceTracker(object):
      @utils.synchronized(COMPUTE_RESOURCE_SEMAPHORE)
      def _update_available_resource(self, context, resources):
  
--        # initialize the compute node object, creating it
 +        self._update_fpga_resource(resources)
 +        LOG.info(_LI("Total FPGA regions: %(fpga)s, total allocated regions: "
 +                     "%(fpga_used)s"),
 +                 {'fpga': resources.get('fpga_regions', 0),
 +                  'fpga_used': resources.get('fpga_regions_used', 0)})
 +
-+        # initialise the compute node object, creating it
+         # initialise the compute node object, creating it
          # if it does not already exist.
          self._init_compute_node(context, resources)
- 
-@@ -990,3 +1009,42 @@ class ResourceTracker(object):
+@@ -1018,3 +1045,42 @@ class ResourceTracker(object):
              if key in updates:
                  usage[key] = updates[key]
          return usage
@@ -238,7 +254,7 @@ index 4436f71..31a27d2 100644
 +            result = utils.execute(CONF.fpga_exec, 'status',
 +                                   run_as_root=True)
 +        except (processutils.ProcessExecutionError, OSError) as err:
-+            stderr = stdout = six.text_type(err)
++            stderr = stdout = str(err)
 +            if hasattr(err, 'stderr') and err.stderr:
 +                stderr = err.stderr
 +            if hasattr(err, 'stdout') and err.stdout:
@@ -260,29 +276,11 @@ index 4436f71..31a27d2 100644
 +
 +        resources['fpga_regions'] = all_regions
 +        resources['fpga_regions_used'] = used_regions
-diff --git a/nova/conf/compute.py b/nova/conf/compute.py
-index 8e9e64d..1a2933a 100644
---- a/nova/conf/compute.py
-+++ b/nova/conf/compute.py
-@@ -225,6 +225,13 @@ NOTE: This can be set per-compute, or if set to 0.0, the value
- set on the scheduler node(s) or compute node(s) will be used and
- defaulted to 1.5.
- """),
-+    cfg.BoolOpt('fpga_access',
-+        default=False,
-+        help="Whether or not instances can access FPGA."),
-+    cfg.StrOpt('fpga_exec',
-+        default=None,
-+        help="Executable for getting status of the FPGA, programming"
-+             "and erasing."),
-     cfg.FloatOpt('disk_allocation_ratio',
-         default=0.0,
-         help="""
-diff --git a/nova/db/sqlalchemy/migrate_repo/versions/335_add_fpga_field.py b/nova/db/sqlalchemy/migrate_repo/versions/335_add_fpga_field.py
+diff --git a/nova/db/sqlalchemy/migrate_repo/versions/320_add_fpga_field.py b/nova/db/sqlalchemy/migrate_repo/versions/320_add_fpga_field.py
 new file mode 100644
 index 0000000..87e1063
 --- /dev/null
-+++ b/nova/db/sqlalchemy/migrate_repo/versions/335_add_fpga_field.py
++++ b/nova/db/sqlalchemy/migrate_repo/versions/320_add_fpga_field.py
 @@ -0,0 +1,31 @@
 +# Copyright 2016 Intel Corporation
 +#
@@ -315,11 +313,11 @@ index 0000000..87e1063
 +    shadow_compute_nodes.create_column(fpga_regions.copy())
 +    compute_nodes.create_column(fpga_regions_used)
 +    shadow_compute_nodes.create_column(fpga_regions_used.copy())
-diff --git a/nova/db/sqlalchemy/migrate_repo/versions/336_add_fpga_instance_field.py b/nova/db/sqlalchemy/migrate_repo/versions/336_add_fpga_instance_field.py
+diff --git a/nova/db/sqlalchemy/migrate_repo/versions/321_add_fpga_instance_field.py b/nova/db/sqlalchemy/migrate_repo/versions/321_add_fpga_instance_field.py
 new file mode 100644
 index 0000000..4fc463b
 --- /dev/null
-+++ b/nova/db/sqlalchemy/migrate_repo/versions/336_add_fpga_instance_field.py
++++ b/nova/db/sqlalchemy/migrate_repo/versions/321_add_fpga_instance_field.py
 @@ -0,0 +1,28 @@
 +# Copyright 2016 Intel Corporation
 +#
@@ -349,11 +347,11 @@ index 0000000..4fc463b
 +
 +    instances.create_column(fpga_device)
 +    shadow_instances.create_column(fpga_device.copy())
-diff --git a/nova/db/sqlalchemy/migrate_repo/versions/337_add_fpga_devices_table.py b/nova/db/sqlalchemy/migrate_repo/versions/337_add_fpga_devices_table.py
+diff --git a/nova/db/sqlalchemy/migrate_repo/versions/322_add_fpga_devices_table.py b/nova/db/sqlalchemy/migrate_repo/versions/322_add_fpga_devices_table.py
 new file mode 100644
 index 0000000..f2f6c44
 --- /dev/null
-+++ b/nova/db/sqlalchemy/migrate_repo/versions/337_add_fpga_devices_table.py
++++ b/nova/db/sqlalchemy/migrate_repo/versions/322_add_fpga_devices_table.py
 @@ -0,0 +1,52 @@
 +# Copyright 2012 OpenStack Foundation
 +#
@@ -408,7 +406,7 @@ index 0000000..f2f6c44
 +
 +    fpga_devices.create()
 diff --git a/nova/db/sqlalchemy/models.py b/nova/db/sqlalchemy/models.py
-index 173c50e..f1373f5 100644
+index a133352..32b9637 100644
 --- a/nova/db/sqlalchemy/models.py
 +++ b/nova/db/sqlalchemy/models.py
 @@ -178,6 +178,10 @@ class ComputeNode(BASE, NovaBase, models.SoftDeleteMixin):
@@ -456,10 +454,10 @@ index 173c50e..f1373f5 100644
      """Represents a cache of information about an instance
 diff --git a/nova/fpga/__init__.py b/nova/fpga/__init__.py
 new file mode 100644
-index 0000000..188fc94
+index 0000000..b0d93e7
 --- /dev/null
 +++ b/nova/fpga/__init__.py
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,106 @@
 +# Copyright 2016 Intel Corporation
 +#
 +# Licensed under the Apache License, Version 2.0 (the "License");
@@ -474,14 +472,12 @@ index 0000000..188fc94
 +# See the License for the specific language governing permissions and
 +# limitations under the License.
 +
-+import six
-+
-+from nova import exception
-+from nova.i18n import _LI
-+from nova import utils
 +from oslo_concurrency.processutils import ProcessExecutionError
 +from oslo_config import cfg
 +from oslo_log import log as logging
++
++from nova import exception
++from nova import utils
 +
 +
 +CONF = cfg.CONF
@@ -514,8 +510,8 @@ index 0000000..188fc94
 +def program_ip(fpga_image, instance):
 +    """Burn image on FPGA"""
 +    if CONF.fpga_simulation_mode:
-+        LOG.info(_LI('Running in simulation mode. '
-+                 'AFU image will not be burned on FPGA'))
++        LOG.info('Running in simulation mode. '
++                 'AFU image will not be burned on FPGA')
 +        return
 +
 +    LOG.debug('Attempting to write image to FPGA.')
@@ -524,7 +520,7 @@ index 0000000..188fc94
 +        write_result = utils.execute(CONF.fpga_exec, 'burn', fpga_image,
 +                                     run_as_root=True)
 +    except (ProcessExecutionError, OSError) as err:
-+        stderr = stdout = six.text_type(err)
++        stderr = stdout = str(err)
 +        if hasattr(err, 'stderr') and err.stderr:
 +            stderr = err.stderr
 +        if hasattr(err, 'stdout') and err.stdout:
@@ -533,13 +529,12 @@ index 0000000..188fc94
 +
 +    if write_result[1]:
 +        error = write_result[1].strip()
-+        LOG.debug("Writing FPGA image failed: %s", error)
-+        LOG.error(_LI("Writing FPGA image failed."))
++        LOG.error("Writing FPGA image failed: %s", error)
 +        raise exception.RescheduledException('Writing FPGA image for instance'
 +                                             ' %s failed: %s' %
 +                                             (instance.uuid, error))
 +    else:
-+        LOG.info(_LI('Writing AFU image succeeded.'))
++        LOG.debug('Writing AFU image succeeded.')
 +
 +    instance.fpga_device = write_result[0].strip()
 +
@@ -547,7 +542,7 @@ index 0000000..188fc94
 +def erase_fpga(instance):
 +    """Erase a region on FPGA"""
 +    if CONF.fpga_simulation_mode:
-+        LOG.info(_LI("Running in simulation mode. Not erasing FPGA"))
++        LOG.info("Running in simulation mode. Not erasing FPGA")
 +        return
 +
 +    LOG.debug("Attempting to erase FPGA device %s", instance.fpga_device)
@@ -556,7 +551,7 @@ index 0000000..188fc94
 +        erase_result = utils.execute(CONF.fpga_exec, 'erase',
 +                                     instance.fpga_device, run_as_root=True)
 +    except (ProcessExecutionError, OSError) as err:
-+        stderr = stdout = six.text_type(err)
++        stderr = stdout = str(err)
 +        if hasattr(err, 'stderr') and err.stderr:
 +            stderr = err.stderr
 +        if hasattr(err, 'stdout') and err.stdout:
@@ -564,17 +559,16 @@ index 0000000..188fc94
 +        erase_result = (stdout, stderr)
 +
 +    if erase_result[1]:
-+        LOG.debug("Erasing FPGA failed: %s", erase_result[1].strip())
-+        LOG.error(_LI("Erasing FPGA failed."))
++        LOG.error("Erasing FPGA failed: %s", erase_result[1].strip())
 +    else:
-+        LOG.info(_LI("Erasing FPGA succeeded."))
++        LOG.debug("Erasing FPGA succeeded.")
 +
 +    return erase_result
 diff --git a/nova/objects/compute_node.py b/nova/objects/compute_node.py
-index d138d3a..581de9c 100644
+index a4f99e1..14abae6 100644
 --- a/nova/objects/compute_node.py
 +++ b/nova/objects/compute_node.py
-@@ -51,7 +51,8 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
+@@ -53,7 +53,8 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject,
      # Version 1.14: Added cpu_allocation_ratio and ram_allocation_ratio
      # Version 1.15: Added uuid
      # Version 1.16: Added disk_allocation_ratio
@@ -584,7 +578,7 @@ index d138d3a..581de9c 100644
  
      fields = {
          'id': fields.IntegerField(read_only=True),
-@@ -92,6 +93,8 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
+@@ -94,6 +95,8 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject,
          'cpu_allocation_ratio': fields.FloatField(),
          'ram_allocation_ratio': fields.FloatField(),
          'disk_allocation_ratio': fields.FloatField(),
@@ -593,17 +587,18 @@ index d138d3a..581de9c 100644
          }
  
      def obj_make_compatible(self, primitive, target_version):
-@@ -202,6 +205,9 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
+@@ -205,6 +208,10 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject,
                      if value == 0.0 and key == 'disk_allocation_ratio':
                          # It's not specified either on the controller
                          value = 1.0
 +
 +            if key in ('fpga_regions', 'fpga_regions_used') and value is None:
 +                value = 0
-             setattr(compute, key, value)
++
+             compute[key] = value
  
          stats = db_compute['stats']
-@@ -423,7 +429,8 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject):
+@@ -351,7 +358,8 @@ class ComputeNode(base.NovaPersistentObject, base.NovaObject,
                  "vcpus_used", "memory_mb_used", "local_gb_used",
                  "numa_topology", "hypervisor_type",
                  "hypervisor_version", "hypervisor_hostname",
@@ -612,7 +607,7 @@ index d138d3a..581de9c 100644
 +                "fpga_regions_used"]
          for key in keys:
              if key in resources:
-                 setattr(self, key, resources[key])
+                 self[key] = resources[key]
 diff --git a/nova/objects/fpga_device.py b/nova/objects/fpga_device.py
 new file mode 100644
 index 0000000..46c9313
@@ -954,21 +949,21 @@ index 0000000..610d2c8
 +            pools = objects.FpgaDevicePoolList(objects=pool_list)
 +    return pools
 diff --git a/nova/objects/image_meta.py b/nova/objects/image_meta.py
-index 2765c53..1bbb4ff 100644
+index 72a16dc..175bef0 100644
 --- a/nova/objects/image_meta.py
 +++ b/nova/objects/image_meta.py
-@@ -164,7 +164,9 @@ class ImageMetaProps(base.NovaObject):
-     # Version 1.13: added os_secure_boot field
-     # Version 1.14: Added 'hw_pointer_model' field
-     # Version 1.15: Added hw_rescue_bus and hw_rescue_device.
--    VERSION = '1.15'
-+    # Version 1.16: Added hw_fpga_ip_id
-+    # Version 1.17: Added docker_devices
-+    VERSION = '1.17'
+@@ -161,7 +161,9 @@ class ImageMetaProps(base.NovaObject):
+     # Version 1.10: added hw_cpu_realtime_mask field
+     # Version 1.11: Added hw_firmware_type field
+     # Version 1.12: Added properties for image signature verification
+-    VERSION = '1.12'
++    # Version 1.13: Added hw_fpga_ip_id
++    # Version 1.14: Added docker_devices
++    VERSION = '1.14'
  
      def obj_make_compatible(self, primitive, target_version):
          super(ImageMetaProps, self).obj_make_compatible(primitive,
-@@ -334,6 +336,12 @@ class ImageMetaProps(base.NovaObject):
+@@ -313,6 +315,12 @@ class ImageMetaProps(base.NovaObject):
          # boolean - If true, this will enable the virtio-multiqueue feature
          'hw_vif_multiqueue_enabled': fields.FlexibleBooleanField(),
  
@@ -982,27 +977,29 @@ index 2765c53..1bbb4ff 100644
          'img_bittorrent': fields.FlexibleBooleanField(),
  
 diff --git a/nova/objects/instance.py b/nova/objects/instance.py
-index 2dd8f76..1f2f21e 100644
+index e759fb5..6caa55f 100644
 --- a/nova/objects/instance.py
 +++ b/nova/objects/instance.py
-@@ -102,7 +102,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
+@@ -88,7 +88,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
+                base.NovaObjectDictCompat):
+     # Version 2.0: Initial version
      # Version 2.1: Added services
-     # Version 2.2: Added keypairs
-     # Version 2.3: Added device_metadata
--    VERSION = '2.3'
-+    # Version 2.4: Added fpga_device
-+    VERSION = '2.4'
+-    VERSION = '2.1'
++    # Version 2.2: Added fpga_device
++    VERSION = '2.2'
  
      fields = {
          'id': fields.IntegerField(),
-@@ -203,6 +204,7 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
+@@ -186,7 +187,8 @@ class Instance(base.NovaPersistentObject, base.NovaObject,
+         'vcpu_model': fields.ObjectField('VirtCPUModel', nullable=True),
          'ec2_ids': fields.ObjectField('EC2Ids'),
          'migration_context': fields.ObjectField('MigrationContext',
-                                                 nullable=True),
-+        'fpga_device': fields.StringField(nullable=True),
-         'keypairs': fields.ObjectField('KeyPairList'),
+-                                                nullable=True)
++                                                nullable=True),
++        'fpga_device': fields.StringField(nullable=True)
          }
  
+     obj_extra_fields = ['name']
 diff --git a/nova/scheduler/filters/fpga_filter.py b/nova/scheduler/filters/fpga_filter.py
 new file mode 100644
 index 0000000..f27c4eb
@@ -1069,7 +1066,7 @@ index 0000000..f27c4eb
 +                return True
 +        return False
 diff --git a/nova/scheduler/host_manager.py b/nova/scheduler/host_manager.py
-index a4573ae..5d6f45c 100644
+index ab0ccf0..def3bcd 100644
 --- a/nova/scheduler/host_manager.py
 +++ b/nova/scheduler/host_manager.py
 @@ -122,6 +122,8 @@ class HostState(object):
@@ -1081,7 +1078,7 @@ index a4573ae..5d6f45c 100644
  
          # Additional host information from the compute node stats:
          self.num_instances = 0
-@@ -248,6 +250,8 @@ class HostState(object):
+@@ -243,6 +245,8 @@ class HostState(object):
          self.cpu_allocation_ratio = compute.cpu_allocation_ratio
          self.ram_allocation_ratio = compute.ram_allocation_ratio
          self.disk_allocation_ratio = compute.disk_allocation_ratio
@@ -1091,10 +1088,10 @@ index a4573ae..5d6f45c 100644
      def consume_from_request(self, spec_obj):
          """Incrementally update host state from a RequestSpec object."""
 diff --git a/nova/tests/unit/api/openstack/fakes.py b/nova/tests/unit/api/openstack/fakes.py
-index a3edd52..d3ef3b3 100644
+index 3b4e339..4b36127 100644
 --- a/nova/tests/unit/api/openstack/fakes.py
 +++ b/nova/tests/unit/api/openstack/fakes.py
-@@ -395,7 +395,7 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
+@@ -442,7 +442,7 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
                    memory_mb=0, vcpus=0, root_gb=0, ephemeral_gb=0,
                    instance_type=None, launch_index=0, kernel_id="",
                    ramdisk_id="", user_data=None, system_metadata=None,
@@ -1103,7 +1100,7 @@ index a3edd52..d3ef3b3 100644
      if user_id is None:
          user_id = 'fake_user'
      if project_id is None:
-@@ -504,7 +504,8 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
+@@ -551,7 +551,8 @@ def stub_instance(id=1, user_id=None, project_id=None, host=None,
                    "flavor": flavorinfo,
                },
          "cleaned": cleaned,
@@ -1114,10 +1111,10 @@ index a3edd52..d3ef3b3 100644
      instance.update(info_cache)
      instance['info_cache']['instance_uuid'] = instance['uuid']
 diff --git a/nova/tests/unit/compute/test_claims.py b/nova/tests/unit/compute/test_claims.py
-index 6bd25e3..f8974fd 100644
+index d31e8b1..1d5fb2b 100644
 --- a/nova/tests/unit/compute/test_claims.py
 +++ b/nova/tests/unit/compute/test_claims.py
-@@ -88,12 +88,14 @@ class ClaimTestCase(test.NoDBTestCase):
+@@ -87,12 +87,14 @@ class ClaimTestCase(test.NoDBTestCase):
  
          requests = requests or self.empty_requests
  
@@ -1133,44 +1130,35 @@ index 6bd25e3..f8974fd 100644
          return get_claim()
  
      def _fake_instance(self, **kwargs):
-@@ -131,6 +133,8 @@ class ClaimTestCase(test.NoDBTestCase):
-             'free_disk_gb': 20,
-             'vcpus': 2,
-             'vcpus_used': 0,
-+            'fpga_regions': 0,
-+            'fpga_regions_used': 0,
-             'numa_topology': objects.NUMATopology(
-                 cells=[objects.NUMACell(id=1, cpuset=set([1, 2]), memory=512,
-                                         memory_usage=0, cpu_usage=0,
-@@ -245,6 +249,27 @@ class ClaimTestCase(test.NoDBTestCase):
-             self._claim, requests=requests)
-         mock_pci_supports_requests.assert_called_once_with([request])
+@@ -227,6 +229,27 @@ class ClaimTestCase(test.NoDBTestCase):
+         self._claim()
+         self.assertFalse(mock_supports.called)
  
 +    def test_fpga_pass(self):
 +        limits = {'fpga_regions': 2}
-+        self.resources.fpga_regions_used = 0
++        self.resources.update({'fpga_regions_used': 0})
 +        claim = self._claim(limits, fpga_ip_id='accelerator_id')
 +        self.assertIsNone(claim._test_fpga(resources=self.resources,
 +                                           limit=2))
 +
 +    def test_fpga_insufficient(self):
 +        limits = {'fpga_regions': 2}
-+        self.resources.fpga_regions_used = 2
++        self.resources.update({'fpga_regions_used': 2})
 +        self.assertRaises(exception.ComputeResourcesUnavailable,
 +                          self._claim, limits=limits,
 +                          fpga_ip_id='accelerator_id')
 +
 +    def test_fpga_pass_when_fpga_not_requested(self):
 +        limits = {'fpga_regions': 2}
-+        self.resources.fpga_regions_used = 2
++        self.resources.update({'fpga_regions_used': 2})
 +        claim = self._claim(limits, fpga_ip_id=None)
 +        self.assertIsNone(claim._test_fpga(resources=self.resources,
 +                                           limit=2))
 +
-     @mock.patch('nova.pci.stats.PciDeviceStats.support_requests')
-     def test_pci_pass_no_requests(self, mock_pci_supports_requests):
+     def test_ext_resources(self):
          self._claim()
-@@ -384,6 +409,7 @@ class MoveClaimTestCase(ClaimTestCase):
+         self.assertTrue(self.tracker.ext_resources_handler.test_called)
+@@ -366,6 +389,7 @@ class MoveClaimTestCase(ClaimTestCase):
  
      def _claim(self, limits=None, overhead=None, requests=None,
                 image_meta=None, **kwargs):
@@ -1178,20 +1166,21 @@ index 6bd25e3..f8974fd 100644
          instance_type = self._fake_instance_type(**kwargs)
          numa_topology = kwargs.pop('numa_topology', None)
          image_meta = image_meta or {}
-@@ -412,7 +438,7 @@ class MoveClaimTestCase(ClaimTestCase):
+@@ -393,7 +417,8 @@ class MoveClaimTestCase(ClaimTestCase):
+         def get_claim(mock_extra_get, mock_numa_get):
              return claims.MoveClaim(self.context, self.instance, instance_type,
-                                      image_meta, self.tracker, self.resources,
-                                      requests, overhead=overhead,
--                                     limits=limits)
-+                                     limits=limits, fpga_ip_id=fpga_ip_id)
+                                     image_meta, self.tracker, self.resources,
+-                                    requests, overhead=overhead, limits=limits)
++                                    requests, overhead=overhead, limits=limits,
++                                    fpga_ip_id=fpga_ip_id)
          return get_claim()
  
-     @mock.patch('nova.objects.Instance.drop_migration_context')
+     def test_ext_resources(self):
 diff --git a/nova/tests/unit/compute/test_compute.py b/nova/tests/unit/compute/test_compute.py
-index 601a4f6..5067e06 100644
+index 337fc37..2065301 100644
 --- a/nova/tests/unit/compute/test_compute.py
 +++ b/nova/tests/unit/compute/test_compute.py
-@@ -194,7 +194,9 @@ class BaseTestCase(test.TestCase):
+@@ -200,7 +200,9 @@ class BaseTestCase(test.TestCase):
                                     'cpu_allocation_ratio': 16.0,
                                     'ram_allocation_ratio': 1.5,
                                     'disk_allocation_ratio': 1.0,
@@ -1203,12 +1192,12 @@ index 601a4f6..5067e06 100644
                          context, objects.ComputeNode(), cn)
                      for cn in fake_compute_nodes]
 diff --git a/nova/tests/unit/compute/test_compute_mgr.py b/nova/tests/unit/compute/test_compute_mgr.py
-index 719bda1..5c5229f 100644
+index d7ff03c..8eb914e 100644
 --- a/nova/tests/unit/compute/test_compute_mgr.py
 +++ b/nova/tests/unit/compute/test_compute_mgr.py
-@@ -253,6 +253,46 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
-             else:
-                 self.assertFalse(db_node.destroy.called)
+@@ -240,6 +240,46 @@ class ComputeManagerUnitTestCase(test.NoDBTestCase):
+             instance.info_cache = None
+             self.compute._delete_instance(self.context, instance, [], quotas)
  
 +    @mock.patch('nova.compute.manager.ComputeManager.'
 +                '_notify_about_instance_usage')
@@ -1250,37 +1239,28 @@ index 719bda1..5c5229f 100644
 +        self.compute._delete_instance(self.context, instance, [], quotas)
 +        self.assertFalse(fpga_erase.called)
 +
-     @mock.patch('nova.compute.utils.notify_about_instance_action')
-     def test_delete_instance_without_info_cache(self, mock_notify):
-         instance = fake_instance.fake_instance_obj(
-@@ -3306,7 +3346,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+     @mock.patch.object(network_api.API, 'allocate_for_instance')
+     @mock.patch.object(objects.Instance, 'save')
+     @mock.patch.object(time, 'sleep')
+@@ -3127,7 +3167,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                  self.image, self.injected_files, self.admin_pass,
                  self.requested_networks, self.security_groups,
                  self.block_device_mapping, self.node, self.limits,
 -                self.filter_properties)
 +                self.filter_properties, request_spec={})
+         self._instance_action_events()
+         self.mox.ReplayAll()
  
-     # This test when sending an icehouse compatible rpc call to juno compute
-     # node, NetworkRequest object can load from three items tuple.
-@@ -3371,7 +3411,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+@@ -3226,7 +3266,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                  self.image, self.injected_files, self.admin_pass,
                  self.requested_networks, self.security_groups,
                  self.block_device_mapping, self.node, self.limits,
--                self.filter_properties)
-+                self.filter_properties, request_spec={})
-         mock_clean_net.assert_called_once_with(self.context, self.instance,
-                 self.requested_networks)
-         mock_clean_vol.assert_called_once_with(self.context,
-@@ -3418,7 +3458,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
-                 self.image, self.injected_files, self.admin_pass,
-                 self.requested_networks, self.security_groups,
-                 self.block_device_mapping, self.node, self.limits,
--                self.filter_properties)
-+                self.filter_properties, request_spec={})
-         mock_clean.assert_called_once_with(self.context, self.instance,
-                 self.compute.host)
-         mock_nil.assert_called_once_with(self.instance)
-@@ -3501,7 +3541,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+-                self.filter_properties).AndRaise(
++                self.filter_properties, request_spec={}).AndRaise(
+                         exception.RescheduledException(reason='',
+                             instance_uuid=self.instance.uuid))
+         self.compute.network_api.cleanup_instance_network_on_host(self.context,
+@@ -3323,7 +3363,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
              self.image, self.injected_files, self.admin_pass,
              self.requested_networks, self.security_groups,
              self.block_device_mapping, self.node, self.limits,
@@ -1289,7 +1269,7 @@ index 719bda1..5c5229f 100644
          mock_cleanup_network.assert_called_once_with(
              self.context, instance, self.compute.host)
          mock_build_ins.assert_called_once_with(self.context,
-@@ -3556,7 +3596,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+@@ -3378,7 +3418,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
              self.image, self.injected_files, self.admin_pass,
              self.requested_networks, self.security_groups,
              self.block_device_mapping, self.node, self.limits,
@@ -1298,48 +1278,57 @@ index 719bda1..5c5229f 100644
          mock_cleanup_network.assert_called_once_with(
              self.context, instance, self.requested_networks)
          mock_build_ins.assert_called_once_with(self.context,
-@@ -3600,7 +3640,8 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
-         mock_build_run.assert_called_once_with(self.context, self.instance,
-                 self.image, self.injected_files, self.admin_pass,
-                 self.requested_networks, self.security_groups,
--                self.block_device_mapping, self.node, self.limits, {})
-+                self.block_device_mapping, self.node, self.limits, {},
-+                                               request_spec={})
-         mock_clean_net.assert_called_once_with(self.context, self.instance,
-                 self.requested_networks)
-         mock_add.assert_called_once_with(self.context, self.instance,
-@@ -3649,7 +3690,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+@@ -3400,7 +3440,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                  self.image, self.injected_files, self.admin_pass,
                  self.requested_networks, self.security_groups,
                  self.block_device_mapping, self.node, self.limits,
--                self.filter_properties)
-+                self.filter_properties, request_spec={})
-         mock_deallocate.assert_called_once_with(self.instance)
-         mock_clean_inst.assert_called_once_with(self.context, self.instance,
-                 self.compute.host)
-@@ -3697,7 +3738,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+-                {}).AndRaise(
++                {}, request_spec={}).AndRaise(
+                         exception.RescheduledException(reason='',
+                             instance_uuid=self.instance.uuid))
+         self.compute._cleanup_allocated_networks(self.context, self.instance,
+@@ -3444,7 +3484,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                  self.image, self.injected_files, self.admin_pass,
                  self.requested_networks, self.security_groups,
                  self.block_device_mapping, self.node, self.limits,
--                self.filter_properties)
-+                self.filter_properties, request_spec={})
-         mock_deallocate.assert_called_once_with(self.instance)
-         mock_clean.assert_called_once_with(self.context, self.instance,
-                 self.requested_networks)
-@@ -3757,7 +3798,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+-                self.filter_properties).AndRaise(
++                self.filter_properties, request_spec={}).AndRaise(
+                         exception.RescheduledException(reason='',
+                             instance_uuid=self.instance.uuid))
+         self.compute.driver.deallocate_networks_on_reschedule(
+@@ -3487,7 +3527,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
                  self.image, self.injected_files, self.admin_pass,
                  self.requested_networks, self.security_groups,
                  self.block_device_mapping, self.node, self.limits,
--                self.filter_properties)
-+                self.filter_properties, request_spec={})
-         mock_clean_net.assert_called_once_with(self.context, self.instance,
+-                self.filter_properties).AndRaise(
++                self.filter_properties, request_spec={}).AndRaise(
+                         exception.RescheduledException(reason='',
+                             instance_uuid=self.instance.uuid))
+         self.compute.driver.deallocate_networks_on_reschedule(
+@@ -3527,7 +3567,7 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+                 self.image, self.injected_files, self.admin_pass,
+                 self.requested_networks, self.security_groups,
+                 self.block_device_mapping, self.node, self.limits,
+-                self.filter_properties).AndRaise(exc)
++                self.filter_properties, request_spec={}).AndRaise(exc)
+         self.compute._cleanup_allocated_networks(self.context, self.instance,
                  self.requested_networks)
+         if cleanup_volumes:
+@@ -3747,7 +3787,8 @@ class ComputeManagerBuildInstanceTestCase(test.NoDBTestCase):
+         exc = exception.ComputeResourcesUnavailable(reason=reason)
  
+         class FakeResourceTracker(object):
+-            def instance_claim(self, context, instance, limits):
++            def instance_claim(self, context, instance, limits,
++                               request_spec=None):
+                 raise exc
+ 
+         self.mox.StubOutWithMock(self.compute, '_get_resource_tracker')
 diff --git a/nova/tests/unit/compute/test_multiple_nodes.py b/nova/tests/unit/compute/test_multiple_nodes.py
-index 2907e94..aae48d6 100644
+index 4e9aa1a..eab0b3f 100644
 --- a/nova/tests/unit/compute/test_multiple_nodes.py
 +++ b/nova/tests/unit/compute/test_multiple_nodes.py
-@@ -100,7 +100,9 @@ class MultiNodeComputeTestCase(BaseTestCase):
+@@ -101,7 +101,9 @@ class MultiNodeComputeTestCase(BaseTestCase):
                                     'cpu_allocation_ratio': None,
                                     'ram_allocation_ratio': None,
                                     'disk_allocation_ratio': None,
@@ -1351,21 +1340,29 @@ index 2907e94..aae48d6 100644
                          context, objects.ComputeNode(), cn)
                      for cn in fake_compute_nodes]
 diff --git a/nova/tests/unit/compute/test_resource_tracker.py b/nova/tests/unit/compute/test_resource_tracker.py
-index fcc623e..9caadc9 100644
+index bfc11fa..ee4f5d5 100644
 --- a/nova/tests/unit/compute/test_resource_tracker.py
 +++ b/nova/tests/unit/compute/test_resource_tracker.py
-@@ -86,6 +86,8 @@ _COMPUTE_NODE_FIXTURES = [
-         cpu_allocation_ratio=16.0,
-         ram_allocation_ratio=1.5,
-         disk_allocation_ratio=1.0,
-+        fpga_regions=0,
-+        fpga_regions_used=0,
-         ),
- ]
- 
-@@ -1371,6 +1373,51 @@ class TestInstanceClaim(BaseTestCase):
-         self.assertTrue(obj_base.obj_equal_prims(expected_updated,
-                                                  self.rt.compute_node))
+@@ -196,6 +196,7 @@ class FakeVirtDriver(driver.ComputeDriver):
+             'hypervisor_version': 0,
+             'hypervisor_hostname': 'fakehost',
+             'cpu_info': '',
++            'fpga_regions': 0,
+             'numa_topology': (
+                 self.numa_topology._to_json() if self.numa_topology else None),
+         }
+@@ -281,6 +282,8 @@ class BaseTestCase(test.TestCase):
+             'cpu_allocation_ratio': None,
+             'ram_allocation_ratio': None,
+             'disk_allocation_ratio': None,
++            'fpga_regions': 0,
++            'fpga_regions_used': 0
+         }
+         if values:
+             compute.update(values)
+@@ -1078,6 +1081,51 @@ class InstanceClaimTestCase(BaseTrackerTestCase):
+             self.tracker.instance_claim(self.context, inst)
+         mock_save.assert_called_once_with()
  
 +    @mock.patch('nova.utils.execute')
 +    def test_update_fpga_resource(self, mock_execute):
@@ -1373,8 +1370,8 @@ index fcc623e..9caadc9 100644
 +        resource_tracker.CONF.fpga_exec = "fpga_exec"
 +        mock_execute.return_value = ('Used regions: 1/2', 0)
 +
-+        resources = {'fpga_regions': 2, 'fpga_regions_used': 0}
-+        self.rt._update_fpga_resource(resources)
++        resources = self._create_compute_node_obj(self.context)
++        self.tracker._update_fpga_resource(resources)
 +
 +        self.assertEqual(resources['fpga_regions'], 2)
 +        self.assertEqual(resources['fpga_regions_used'], 1)
@@ -1388,8 +1385,8 @@ index fcc623e..9caadc9 100644
 +        resource_tracker.CONF.fpga_exec = "fpga_exec"
 +        mock_execute.side_effect = OSError('fpga_exec binary not found')
 +
-+        resources = {'fpga_regions': 0, 'fpga_regions_used': 0}
-+        self.rt._update_fpga_resource(resources)
++        resources = self._create_compute_node_obj(self.context)
++        self.tracker._update_fpga_resource(resources)
 +
 +        self.assertEqual(resources['fpga_regions'], 0)
 +        self.assertEqual(resources['fpga_regions_used'], 0)
@@ -1403,8 +1400,8 @@ index fcc623e..9caadc9 100644
 +        resource_tracker.CONF.fpga_exec = "fpga_exec"
 +        mock_exec.return_value = ('Invalid format of this message', 0)
 +
-+        resources = {'fpga_regions': 0, 'fpga_regions_used': 0}
-+        self.rt._update_fpga_resource(resources)
++        resources = self._create_compute_node_obj(self.context)
++        self.tracker._update_fpga_resource(resources)
 +
 +        self.assertEqual(resources['fpga_regions'], 0)
 +        self.assertEqual(resources['fpga_regions_used'], 0)
@@ -1412,35 +1409,14 @@ index fcc623e..9caadc9 100644
 +        # Cleanup
 +        resource_tracker.CONF.fpga_access = False
 +
-     @mock.patch('nova.objects.InstancePCIRequests.get_by_instance_uuid')
-     @mock.patch('nova.objects.MigrationList.get_in_progress_by_host_and_node')
-     def test_claim(self, migr_mock, pci_mock):
-@@ -1609,7 +1656,6 @@ class TestResize(BaseTestCase):
-         get_mock.return_value = _INSTANCE_FIXTURES
-         migr_mock.return_value = []
-         get_cn_mock.return_value = _COMPUTE_NODE_FIXTURES[0]
--
-         instance = _INSTANCE_FIXTURES[0].obj_clone()
-         instance.new_flavor = _INSTANCE_TYPE_OBJ_FIXTURES[2]
-         # This migration context is fine, it points to the first instance
-diff --git a/nova/tests/unit/compute/test_shelve.py b/nova/tests/unit/compute/test_shelve.py
-index 2dcc81f..4cb3869 100644
---- a/nova/tests/unit/compute/test_shelve.py
-+++ b/nova/tests/unit/compute/test_shelve.py
-@@ -36,6 +36,8 @@ def _fake_resources():
-         'local_gb': 20,
-         'local_gb_used': 0,
-         'free_disk_gb': 20,
-+        'fpga_regions': 0,
-+        'fpga_regions_used': 0,
-         'vcpus': 2,
-         'vcpus_used': 0
-     }
+     @mock.patch('nova.objects.InstancePCIRequests.get_by_instance_uuid',
+                 return_value=objects.InstancePCIRequests(requests=[]))
+     def test_claim_sets_instance_host_and_node(self, mock_get):
 diff --git a/nova/tests/unit/db/test_db_api.py b/nova/tests/unit/db/test_db_api.py
-index a4483c4..c007e64 100644
+index 9e0eda9..423e7f1 100644
 --- a/nova/tests/unit/db/test_db_api.py
 +++ b/nova/tests/unit/db/test_db_api.py
-@@ -7663,7 +7663,8 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
+@@ -7441,7 +7441,8 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
                                   cpu_allocation_ratio=16.0,
                                   ram_allocation_ratio=1.5,
                                   disk_allocation_ratio=1.0,
@@ -1450,44 +1426,36 @@ index a4483c4..c007e64 100644
          # add some random stats
          self.stats = dict(num_instances=3, num_proj_12345=2,
                       num_proj_23456=2, num_vm_building=3)
-@@ -7712,6 +7713,8 @@ class ComputeNodeTestCase(test.TestCase, ModelsObjectComparatorMixin):
-                                  cpu_allocation_ratio=16.0,
-                                  ram_allocation_ratio=1.5,
-                                  disk_allocation_ratio=1.0,
-+                                 fpga_regions=0,
-+                                 fpga_regions_used=0,
-                                  stats='', numa_topology='')
-         stats = dict(num_instances=2, num_proj_12345=1,
-                      num_proj_23456=1, num_vm_building=2)
-@@ -8905,7 +8908,7 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
-             # NOTE(PaulMurray): migration 333 adds 'console_auth_tokens'
+@@ -8607,7 +8608,8 @@ class ArchiveTestCase(test.TestCase, ModelsObjectComparatorMixin):
+             # with no shadow table and it's OK, so skip.
+             # 318 adds one more: 'resource_provider_aggregates'.
              if table_name in ['tags', 'resource_providers', 'allocations',
-                               'inventories', 'resource_provider_aggregates',
--                              'console_auth_tokens']:
-+                              'console_auth_tokens', 'fpga_devices']:
+-                              'inventories', 'resource_provider_aggregates']:
++                              'inventories', 'resource_provider_aggregates',
++                              'fpga_devices']:
                  continue
  
              if table_name.startswith("shadow_"):
 diff --git a/nova/tests/unit/db/test_migrations.py b/nova/tests/unit/db/test_migrations.py
-index 7c47f4c..6f10063 100644
+index d99cbd2..cd091b5 100644
 --- a/nova/tests/unit/db/test_migrations.py
 +++ b/nova/tests/unit/db/test_migrations.py
-@@ -916,6 +916,23 @@ class NovaMigrationsCheckers(test_migrations.ModelsMigrationsSync,
-         self.assertColumnExists(engine, 'shadow_instance_extra',
-                                         'device_metadata')
+@@ -885,6 +885,23 @@ class NovaMigrationsCheckers(test_migrations.ModelsMigrationsSync,
+                                 'instances_deleted_created_at_idx',
+                                 ['deleted', 'created_at'])
  
-+    def _check_335(self, engine, data):
++    def _check_320(self, engine, data):
 +        self.assertColumnExists(engine, 'compute_nodes', 'fpga_regions')
 +        self.assertColumnExists(engine, 'shadow_compute_nodes', 'fpga_regions')
 +        self.assertColumnExists(engine, 'compute_nodes', 'fpga_regions_used')
 +        self.assertColumnExists(engine, 'shadow_compute_nodes',
 +                                'fpga_regions_used')
 +
-+    def _check_336(self, engine, data):
++    def _check_321(self, engine, data):
 +        self.assertColumnExists(engine, 'instances', 'fpga_device')
 +        self.assertColumnExists(engine, 'shadow_instances', 'fpga_device')
 +
-+    def _check_337(self, engine, data):
++    def _check_322(self, engine, data):
 +        self.assertColumnExists(engine, 'fpga_devices', 'instance_uuid')
 +        self.assertIndexMembers(engine, 'fpga_devices',
 +                                'ix_fpga_devices_instance_uuid',
@@ -1496,40 +1464,6 @@ index 7c47f4c..6f10063 100644
  
  class TestNovaMigrationsSQLite(NovaMigrationsCheckers,
                                 test_base.DbTestCase,
-diff --git a/nova/tests/unit/db/test_sqlalchemy_migration.py b/nova/tests/unit/db/test_sqlalchemy_migration.py
-index 9f2af9d..102871d 100644
---- a/nova/tests/unit/db/test_sqlalchemy_migration.py
-+++ b/nova/tests/unit/db/test_sqlalchemy_migration.py
-@@ -239,29 +239,6 @@ class TestNewtonCheck(test.TestCase):
-             '330_enforce_mitaka_online_migrations')
-         self.engine = db_api.get_engine()
- 
--    def test_all_migrated(self):
--        cn = objects.ComputeNode(context=self.context,
--                                 vcpus=1, memory_mb=512, local_gb=10,
--                                 vcpus_used=0, memory_mb_used=256,
--                                 local_gb_used=5, hypervisor_type='HyperDanVM',
--                                 hypervisor_version='34', cpu_info='foo')
--        cn.create()
--        objects.Aggregate(context=self.context,
--                          name='foo').create()
--        objects.PciDevice.create(self.context, {})
--        self.migration.upgrade(self.engine)
--
--    def test_cn_not_migrated(self):
--        cn = objects.ComputeNode(context=self.context,
--                                 vcpus=1, memory_mb=512, local_gb=10,
--                                 vcpus_used=0, memory_mb_used=256,
--                                 local_gb_used=5, hypervisor_type='HyperDanVM',
--                                 hypervisor_version='34', cpu_info='foo')
--        cn.create()
--        db_api.compute_node_update(self.context, cn.id, {'uuid': None})
--        self.assertRaises(exception.ValidationError,
--                          self.migration.upgrade, self.engine)
--
-     def test_aggregate_not_migrated(self):
-         agg = db_api.aggregate_create(self.context, {"name": "foobar"})
-         db_api.aggregate_update(self.context, agg.id, {'uuid': None})
 diff --git a/nova/tests/unit/fpga/__init__.py b/nova/tests/unit/fpga/__init__.py
 new file mode 100644
 index 0000000..e69de29
@@ -1700,10 +1634,10 @@ index 0000000..32f35c8
 +        erase_result = fpga.erase_fpga(instance)
 +        self.assertTrue(erase_result[1])
 diff --git a/nova/tests/unit/objects/test_compute_node.py b/nova/tests/unit/objects/test_compute_node.py
-index ff0459b..b92cf0b 100644
+index 53dd57a..132b649 100644
 --- a/nova/tests/unit/objects/test_compute_node.py
 +++ b/nova/tests/unit/objects/test_compute_node.py
-@@ -90,6 +90,8 @@ fake_compute_node = {
+@@ -89,6 +89,8 @@ fake_compute_node = {
      'cpu_allocation_ratio': 16.0,
      'ram_allocation_ratio': 1.5,
      'disk_allocation_ratio': 1.0,
@@ -1713,34 +1647,34 @@ index ff0459b..b92cf0b 100644
  # FIXME(sbauza) : For compatibility checking, to be removed once we are sure
  # that all computes are running latest DB version with host field in it.
 diff --git a/nova/tests/unit/objects/test_objects.py b/nova/tests/unit/objects/test_objects.py
-index 6bc72d6..a86e942 100644
+index 199e351..335de63 100644
 --- a/nova/tests/unit/objects/test_objects.py
 +++ b/nova/tests/unit/objects/test_objects.py
-@@ -1109,7 +1109,7 @@ object_data = {
-     'BuildRequestList': '1.0-cd95608eccb89fbc702c8b52f38ec738',
+@@ -1107,7 +1107,7 @@ object_data = {
+     'BlockDeviceMappingList': '1.17-1e568eecb91d06d4112db9fd656de235',
+     'BuildRequest': '1.0-e4ca475cabb07f73d8176f661afe8c55',
      'CellMapping': '1.0-7f1a7e85a22bbb7559fc730ab658b9bd',
-     'CellMappingList': '1.0-4ee0d9efdfd681fed822da88376e04d2',
 -    'ComputeNode': '1.16-2436e5b836fa0306a3c4e6d9e5ddacec',
 +    'ComputeNode': '1.17-0b99b9d63197845ba019e9d34b4315ae',
-     'ComputeNodeList': '1.15-4ec4ea3ed297edbd25c33e2aaf797cca',
+     'ComputeNodeList': '1.14-3b6f4f5ade621c40e70cb116db237844',
      'DNSDomain': '1.0-7b0b2dab778454b6a7b6c66afe163a1a',
      'DNSDomainList': '1.0-4ee0d9efdfd681fed822da88376e04d2',
-@@ -1132,8 +1132,8 @@ object_data = {
+@@ -1126,8 +1126,8 @@ object_data = {
+     'HyperVLiveMigrateData': '1.0-0b868dd6228a09c3f3e47016dddf6a1c',
      'HVSpec': '1.2-db672e73304da86139086d003f3977e7',
-     'IDEDeviceBus': '1.0-29d4c9f27ac44197f01b6ac1b7e16502',
      'ImageMeta': '1.8-642d1b2eb3e880a367f37d72dd76162d',
--    'ImageMetaProps': '1.15-d45133ec8d2d4a6456338fb0ffd0e5c2',
--    'Instance': '2.3-4f98ab23f4b0a25fabb1040c8f5edecc',
-+    'ImageMetaProps': '1.17-a69b05c98ac0f1183b61c50c3a848db6',
-+    'Instance': '2.4-0438594b2facc08b6d9b5743aefd95e1',
+-    'ImageMetaProps': '1.12-6a132dee47931447bf86c03c7006d96c',
+-    'Instance': '2.1-416fdd0dfc33dfa12ff2cfdd8cc32e17',
++    'ImageMetaProps': '1.14-fcbac42ba52c57b3b36943f22c9c2479',
++    'Instance': '2.2-4f19e099bf0fd83676be061e0707acdf',
      'InstanceAction': '1.1-f9f293e526b66fca0d05c3b3a2d13914',
      'InstanceActionEvent': '1.1-e56a64fa4710e43ef7af2ad9d6028b33',
      'InstanceActionEventList': '1.1-13d92fb953030cdbfee56481756e02be',
 diff --git a/nova/tests/unit/scheduler/fakes.py b/nova/tests/unit/scheduler/fakes.py
-index bbf1761..dbbfa4c 100644
+index 32e7907..22fd126 100644
 --- a/nova/tests/unit/scheduler/fakes.py
 +++ b/nova/tests/unit/scheduler/fakes.py
-@@ -82,7 +82,7 @@ COMPUTE_NODES = [
+@@ -64,7 +64,7 @@ COMPUTE_NODES = [
              hypervisor_type='foo', supported_hv_specs=[],
              pci_device_pools=None, cpu_info=None, stats=None, metrics=None,
              cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
@@ -1749,7 +1683,7 @@ index bbf1761..dbbfa4c 100644
          objects.ComputeNode(
              id=2, local_gb=2048, memory_mb=2048, vcpus=2,
              disk_available_least=1024, free_ram_mb=1024, vcpus_used=2,
-@@ -93,7 +93,7 @@ COMPUTE_NODES = [
+@@ -74,7 +74,7 @@ COMPUTE_NODES = [
              hypervisor_type='foo', supported_hv_specs=[],
              pci_device_pools=None, cpu_info=None, stats=None, metrics=None,
              cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
@@ -1758,7 +1692,7 @@ index bbf1761..dbbfa4c 100644
          objects.ComputeNode(
              id=3, local_gb=4096, memory_mb=4096, vcpus=4,
              disk_available_least=3333, free_ram_mb=3072, vcpus_used=1,
-@@ -104,7 +104,7 @@ COMPUTE_NODES = [
+@@ -84,7 +84,7 @@ COMPUTE_NODES = [
              hypervisor_type='foo', supported_hv_specs=[],
              pci_device_pools=None, cpu_info=None, stats=None, metrics=None,
              cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
@@ -1767,7 +1701,7 @@ index bbf1761..dbbfa4c 100644
          objects.ComputeNode(
              id=4, local_gb=8192, memory_mb=8192, vcpus=8,
              disk_available_least=8192, free_ram_mb=8192, vcpus_used=0,
-@@ -115,7 +115,7 @@ COMPUTE_NODES = [
+@@ -94,7 +94,7 @@ COMPUTE_NODES = [
              hypervisor_type='foo', supported_hv_specs=[],
              pci_device_pools=None, cpu_info=None, stats=None, metrics=None,
              cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
@@ -1778,10 +1712,10 @@ index bbf1761..dbbfa4c 100644
              id=5, local_gb=1024, memory_mb=1024, vcpus=1,
 diff --git a/nova/tests/unit/scheduler/filters/test_fpga_filter.py b/nova/tests/unit/scheduler/filters/test_fpga_filter.py
 new file mode 100644
-index 0000000..97e7df1
+index 0000000..3af1f54
 --- /dev/null
 +++ b/nova/tests/unit/scheduler/filters/test_fpga_filter.py
-@@ -0,0 +1,62 @@
+@@ -0,0 +1,61 @@
 +# Copyright 2016, OpenStack Foundation
 +# All Rights Reserved.
 +#
@@ -1798,9 +1732,8 @@ index 0000000..97e7df1
 +# limitations under the License.
 +
 +from nova import objects
-+from nova import test
-+
 +from nova.scheduler.filters import fpga_filter
++from nova import test
 +from nova.tests.unit.scheduler import fakes
 +
 +
@@ -1845,10 +1778,10 @@ index 0000000..97e7df1
 +                                   {'fpga_regions': fpga_regions,
 +                                    'fpga_regions_used': fpga_regions_used})
 diff --git a/nova/tests/unit/scheduler/test_host_manager.py b/nova/tests/unit/scheduler/test_host_manager.py
-index 312e1ef..fe69f3c 100644
+index d6e7b13..b9a4805 100644
 --- a/nova/tests/unit/scheduler/test_host_manager.py
 +++ b/nova/tests/unit/scheduler/test_host_manager.py
-@@ -967,7 +967,7 @@ class HostStateTestCase(test.NoDBTestCase):
+@@ -892,7 +892,7 @@ class HostStateTestCase(test.NoDBTestCase):
              hypervisor_version=hyper_ver_int, numa_topology=None,
              pci_device_pools=None, metrics=None,
              cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
@@ -1857,7 +1790,7 @@ index 312e1ef..fe69f3c 100644
  
          host = host_manager.HostState("fakehost", "fakenode")
          host.update(compute=compute)
-@@ -1010,7 +1010,7 @@ class HostStateTestCase(test.NoDBTestCase):
+@@ -935,7 +935,7 @@ class HostStateTestCase(test.NoDBTestCase):
              hypervisor_version=hyper_ver_int, numa_topology=None,
              pci_device_pools=None, metrics=None,
              cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
@@ -1866,7 +1799,7 @@ index 312e1ef..fe69f3c 100644
  
          host = host_manager.HostState("fakehost", "fakenode")
          host.update(compute=compute)
-@@ -1043,7 +1043,7 @@ class HostStateTestCase(test.NoDBTestCase):
+@@ -968,7 +968,7 @@ class HostStateTestCase(test.NoDBTestCase):
              hypervisor_version=hyper_ver_int, numa_topology=None,
              pci_device_pools=None, metrics=None,
              cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
@@ -1875,7 +1808,7 @@ index 312e1ef..fe69f3c 100644
  
          host = host_manager.HostState("fakehost", "fakenode")
          host.update(compute=compute)
-@@ -1204,7 +1204,7 @@ class HostStateTestCase(test.NoDBTestCase):
+@@ -1129,7 +1129,7 @@ class HostStateTestCase(test.NoDBTestCase):
              numa_topology=fakes.NUMA_TOPOLOGY._to_json(),
              stats=None, pci_device_pools=None,
              cpu_allocation_ratio=16.0, ram_allocation_ratio=1.5,
@@ -1884,22 +1817,3 @@ index 312e1ef..fe69f3c 100644
          host = host_manager.HostState("fakehost", "fakenode")
          host.update(compute=compute)
  
-diff --git a/nova/virt/driver.py b/nova/virt/driver.py
-index 1ca49a4..32028bd 100644
---- a/nova/virt/driver.py
-+++ b/nova/virt/driver.py
-@@ -1614,9 +1614,11 @@ def load_compute_driver(virtapi, compute_driver=None):
- 
-     LOG.info(_LI("Loading compute driver '%s'"), compute_driver)
-     try:
--        driver = importutils.import_object(
--            'nova.virt.%s' % compute_driver,
--            virtapi)
-+        if "docker" in compute_driver:
-+            driver = importutils.import_object(compute_driver, virtapi)
-+        else:
-+            driver = importutils.import_object(
-+                'nova.virt.%s' % compute_driver, virtapi)
-         return utils.check_isinstance(driver, ComputeDriver)
-     except ImportError:
-         LOG.exception(_LE("Unable to load the virtualization driver"))
